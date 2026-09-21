@@ -1,0 +1,11 @@
+# mosaic.sh runs on macOS. CRLF would break the shebang and the heredocs,
+# so it stays LF no matter which machine touches it.
+*.sh text eol=lf
+
+*.ps1 text eol=crlf
+*.py  text eol=lf
+*.md  text eol=lf
+*.json text eol=lf
+
+*.gguf binary
+*.mp3  binary

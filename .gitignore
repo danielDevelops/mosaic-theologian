@@ -1,0 +1,29 @@
+# Scripture text is never committed. Download it with EnsureDeps instead.
+data/bible/
+
+# Crawled and derived content
+data/pages/
+data/audio/
+data/transcripts/
+data/inbox/
+index/
+models/
+
+# Runtime state
+state/*.jsonl
+state/*.json
+state/*.log
+state/*.lock
+state/*.pid
+*.part
+
+# Export bundles
+mosaic-portable/
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Secrets
+config/secrets.json

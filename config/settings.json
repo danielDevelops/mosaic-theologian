@@ -1,0 +1,113 @@
+{
+  "Bible": {
+    "SourceUrl": "https://raw.githubusercontent.com/Amosamevor/Bible-json/main/versions/en/ENGLISH%20STANDARD%20VERSION.json",
+    "LocalFile": "data/bible/esv.json",
+    "Translation": "ESV",
+    "ExpectedBookCount": 66,
+    "FallbackUrl": "https://raw.githubusercontent.com/thiagobodruk/bible/master/json/en_bbe.json",
+    "FallbackTranslation": "BBE"
+  },
+
+  "Site": {
+    "BaseUrl": "https://thisismosaic.org",
+    "UserAgent": "MosaicTheologian/1.0 (personal offline study index; contact: local user)",
+    "DelaySecondsMin": 2.0,
+    "DelaySecondsMax": 5.0,
+    "TimeoutSeconds": 45,
+    "SeedPaths": [
+      "/",
+      "/messages/",
+      "/messages/archive",
+      "/about/core-beliefs/",
+      "/about/mission-vision-values/",
+      "/resources/"
+    ],
+    "BeliefPaths": [
+      "/about/core-beliefs/",
+      "/about/mission-vision-values/"
+    ],
+    "DenyPatterns": [
+      "/calendar/",
+      "/community-groups/join-a-group/",
+      "/wp-admin",
+      "/wp-login",
+      "/feed",
+      "?share=",
+      "?replytocom="
+    ],
+    "AudioHosts": [
+      "podcast.thisismosaic.org"
+    ]
+  },
+
+  "Audio": {
+    "KeepAfterTranscribe": false,
+    "MaxBytes": 314572800,
+    "MinBytes": 20480
+  },
+
+  "Whisper": {
+    "Model": "distil-large-v3",
+    "Device": "cuda",
+    "ComputeType": "float16",
+    "CpuComputeType": "int8",
+    "Language": "en",
+    "BeamSize": 5,
+    "VadFilter": true
+  },
+
+  "Embedding": {
+    "Model": "BAAI/bge-small-en-v1.5",
+    "Revision": "main",
+    "Dimension": 384,
+    "BatchSize": 64,
+    "Device": "cuda",
+    "LocalDir": "models/embedding",
+    "QueryPrefix": "Represent this sentence for searching relevant passages: "
+  },
+
+  "Chat": {
+    "Runtime": "llama.cpp",
+    "ModelFile": "models/chat.gguf",
+    "ServerUrl": "http://127.0.0.1:8080",
+    "ContextTokens": 8192,
+    "MaxTokens": 900,
+    "Temperature": 0.2,
+    "TopP": 0.9
+  },
+
+  "Chunking": {
+    "SermonTargetTokens": 1000,
+    "SermonOverlapTokens": 150,
+    "VerseWindowSize": 6,
+    "VerseWindowStride": 3,
+    "PageMaxTokens": 900
+  },
+
+  "Retrieval": {
+    "TopK": {
+      "scripture": 6,
+      "beliefs": 4,
+      "mosaic": 8
+    },
+    "Weights": {
+      "scripture": 1.25,
+      "beliefs": 1.1,
+      "mosaic": 1.0
+    },
+    "CandidateMultiplier": 4,
+    "MaxContextChars": 14000,
+    "ScriptureRefBoost": 0.15
+  },
+
+  "Web": {
+    "Host": "127.0.0.1",
+    "Port": 8787
+  },
+
+  "Export": {
+    "IncludeTranscripts": true,
+    "IncludePages": true,
+    "ExcludeAudio": true
+  }
+}

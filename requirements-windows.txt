@@ -1,0 +1,14 @@
+# Windows build machine (RTX 4070 Ti Super).
+# torch is installed separately by EnsureDeps from the CUDA index URL;
+# a plain "pip install torch" pulls a CPU-only wheel.
+
+requests>=2.31
+beautifulsoup4>=4.12
+lxml>=5.0
+faster-whisper>=1.0.3
+sentence-transformers>=3.0
+lancedb>=0.13
+pyarrow>=16.0
+pandas>=2.2
+fastapi>=0.115
+uvicorn>=0.30

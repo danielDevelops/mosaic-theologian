@@ -1,0 +1,11 @@
+# Intel MacBook Pro query runtime. CPU only.
+# No faster-whisper, no crawler deps: the Mac never transcribes or crawls.
+# torch resolves to the CPU wheel on macOS x86_64, which is what we want.
+
+requests>=2.31
+sentence-transformers>=3.0
+lancedb>=0.13
+pyarrow>=16.0
+pandas>=2.2
+fastapi>=0.115
+uvicorn>=0.30
