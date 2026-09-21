@@ -1,7 +1,12 @@
 # Windows build machine (RTX 4070 Ti Super).
 # torch is installed separately by EnsureDeps from the CUDA index URL;
 # a plain "pip install torch" pulls a CPU-only wheel.
+#
+# numpy is installed by EnsureDeps *before* torch. It is pinned here too so a
+# manual "pip install -r" cannot leave torch importable but NumPy-less, which
+# only shows up as a warning on stderr and is easy to miss.
 
+numpy>=1.26
 requests>=2.31
 beautifulsoup4>=4.12
 lxml>=5.0

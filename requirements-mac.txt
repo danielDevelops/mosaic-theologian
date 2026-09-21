@@ -2,6 +2,7 @@
 # No faster-whisper, no crawler deps: the Mac never transcribes or crawls.
 # torch resolves to the CPU wheel on macOS x86_64, which is what we want.
 
+numpy>=1.26
 requests>=2.31
 sentence-transformers>=3.0
 lancedb>=0.13

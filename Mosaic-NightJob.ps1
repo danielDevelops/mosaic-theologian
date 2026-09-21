@@ -140,14 +140,113 @@ function Test-CommandExists {
     return [bool](Get-Command $Name -ErrorAction SilentlyContinue)
 }
 
+function ConvertTo-NativeArgument {
+    <#
+        Quote one argument for a Windows command line.
+
+        Start-Process -ArgumentList joins an array with spaces and does not
+        quote the elements, so any path containing a space is silently split
+        into two arguments. Install under "C:\Mosaic LLM\..." and every probe
+        breaks with a confusing "can't open file 'C:\Mosaic'".
+
+        Follows the CommandLineToArgvW rules: double the backslashes that
+        precede a quote, double a trailing backslash run, then wrap.
+    #>
+    param([string] $Value)
+
+    if ($null -eq $Value -or $Value -eq '') { return '""' }
+    if ($Value -notmatch '[ \t"]')          { return $Value }
+
+    $escaped = [regex]::Replace($Value, '(\\*)"', '$1$1\"')
+    $escaped = [regex]::Replace($escaped, '(\\+)$', '$1$1')
+    return '"' + $escaped + '"'
+}
+
+function Invoke-Native {
+    <#
+        Run an external command without letting its stderr kill the script.
+
+        $ErrorActionPreference = 'Stop' applies to native commands too: anything
+        a child process writes to stderr becomes a terminating error. Plenty of
+        well-behaved tools use stderr for warnings - pip announces upgrades,
+        torch warns about NumPy, winget writes progress - so without this every
+        one of those becomes a crash. Redirecting with 2>$null is not enough,
+        because the error record is raised before the redirect applies.
+
+        Returns a hashtable: ExitCode, StdOut, StdErr.
+    #>
+    param(
+        [Parameter(Mandatory)] [string]   $FilePath,
+        [string[]] $Arguments = @(),
+        [switch]   $PassThruOutput   # also echo stdout to the console
+    )
+
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+
+    $outFile = Join-Path $StateDir ("native-{0}.out" -f [guid]::NewGuid().ToString('N'))
+    $errFile = "$outFile.err"
+
+    try {
+        $startArgs = @{
+            FilePath               = $FilePath
+            NoNewWindow            = $true
+            Wait                   = $true
+            PassThru               = $true
+            RedirectStandardOutput = $outFile
+            RedirectStandardError  = $errFile
+        }
+        if ($Arguments.Count -gt 0) {
+            # One pre-quoted string, not the raw array: see ConvertTo-NativeArgument.
+            $startArgs.ArgumentList =
+                ($Arguments | ForEach-Object { ConvertTo-NativeArgument $_ }) -join ' '
+        }
+
+        $proc = Start-Process @startArgs
+
+        $stdout = if (Test-Path $outFile) {
+            [System.IO.File]::ReadAllText($outFile, [System.Text.Encoding]::UTF8) } else { '' }
+        $stderr = if (Test-Path $errFile) {
+            [System.IO.File]::ReadAllText($errFile, [System.Text.Encoding]::UTF8) } else { '' }
+
+        if ($PassThruOutput -and $stdout.Trim()) { Write-Host $stdout.TrimEnd() }
+
+        return @{
+            ExitCode = $proc.ExitCode
+            StdOut   = $stdout.Trim()
+            StdErr   = $stderr.Trim()
+        }
+    }
+    finally {
+        Remove-Item $outFile, $errFile -Force -ErrorAction SilentlyContinue
+        $ErrorActionPreference = $previous
+    }
+}
+
+function Invoke-PipInstall {
+    param([string[]] $PipArgs, [string] $Label)
+
+    $result = Invoke-Native -FilePath $VenvPython -Arguments (@('-m', 'pip', 'install') + $PipArgs)
+    if ($result.ExitCode -ne 0) {
+        Write-Log "pip install failed for $Label (exit $($result.ExitCode))" 'WARN'
+        $detail = ($result.StdErr -split "`n" | Select-Object -Last 4) -join ' '
+        if ($detail) { Write-Log "  $detail" 'WARN' }
+        return $false
+    }
+    return $true
+}
+
 # ------------------------------------------------------------ dependencies --
 
 function Install-WithWinget {
     param([string] $Id, [string] $Command, [string] $Friendly)
 
     if (Test-CommandExists $Command) {
-        $version = ''
-        try { $version = (& $Command --version 2>&1 | Select-Object -First 1) } catch { }
+        # Some tools (ffmpeg among them) print their banner on stderr, so read
+        # both streams before deciding the version string is empty.
+        $probe = Invoke-Native -FilePath $Command -Arguments @('--version')
+        $text = if ($probe.StdOut) { $probe.StdOut } else { $probe.StdErr }
+        $version = ($text -split "`n" | Select-Object -First 1).Trim()
         Write-Log "$Friendly already present ($version)"
         Write-DepRecord -Name $Friendly -Version "$version" -Source 'pre-existing' -AlreadyPresent $true
         return $true
@@ -159,8 +258,10 @@ function Install-WithWinget {
     }
 
     Write-Log "Installing $Friendly via winget ($Id)"
-    & winget install --id $Id --accept-source-agreements --accept-package-agreements --silent 2>&1 |
-        ForEach-Object { Write-Verbose $_ }
+    Invoke-Native -FilePath 'winget' -Arguments @(
+        'install', '--id', $Id,
+        '--accept-source-agreements', '--accept-package-agreements', '--silent'
+    ) | Out-Null
 
     # winget updates PATH for new processes, not this one.
     $env:Path = [System.Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' +
@@ -176,43 +277,104 @@ function Install-WithWinget {
     return $false
 }
 
+function Test-Torch {
+    <#
+        Report torch version and whether it can see the GPU.
+
+        NumPy has to be importable before this runs. Without it torch still
+        imports but warns on stderr, and that warning is enough to abort the
+        script when native stderr is treated as an error.
+    #>
+    $code = 'import sys' + "`n" +
+            'try:' + "`n" +
+            '    import torch' + "`n" +
+            '    sys.stdout.write(torch.__version__ + "|" + str(torch.cuda.is_available()))' + "`n" +
+            'except Exception as exc:' + "`n" +
+            '    sys.stdout.write("ABSENT|" + type(exc).__name__)' + "`n"
+
+    $result = Invoke-Native -FilePath $VenvPython -Arguments @('-W', 'ignore', '-c', $code)
+    return $result.StdOut
+}
+
 function Initialize-PythonEnv {
     if (-not (Test-Path $VenvPython)) {
         Write-Log 'Creating virtual environment (.venv)'
-        & python -m venv $VenvDir
+        $venv = Invoke-Native -FilePath 'python' -Arguments @('-m', 'venv', $VenvDir)
+        if ($venv.ExitCode -ne 0) {
+            throw "Could not create the virtual environment: $($venv.StdErr)"
+        }
         Write-DepRecord -Name 'venv' -Source '.venv' -Installed $true
     } else {
         Write-Log 'Virtual environment already present'
     }
 
-    & $VenvPython -m pip install --upgrade pip --quiet
+    Invoke-PipInstall -PipArgs @('--upgrade', 'pip', '--quiet') -Label 'pip' | Out-Null
 
-    # torch must come from the CUDA index. A plain "pip install torch" pulls a
+    # NumPy first, before anything imports torch. torch degrades to a stderr
+    # warning when NumPy is missing, and that warning aborts the run.
+    Write-Log 'Installing numpy'
+    if (-not (Invoke-PipInstall -PipArgs @('numpy>=1.26', '--quiet') -Label 'numpy')) {
+        throw 'numpy is required before torch can be installed.'
+    }
+
+    # torch must come from a CUDA index. A plain "pip install torch" pulls a
     # CPU-only wheel and the embedding pass then runs an order slower.
-    $torchOk = $false
-    try {
-        $probe = & $VenvPython -c "import torch,sys; sys.stdout.write(f'{torch.__version__}|{torch.cuda.is_available()}')" 2>$null
-        if ($LASTEXITCODE -eq 0 -and $probe -match '\|True$') {
-            Write-Log "torch with CUDA already present ($probe)"
-            Write-DepRecord -Name 'torch' -Version "$probe" -Source 'pre-existing' -AlreadyPresent $true
-            $torchOk = $true
-        }
-    } catch { }
+    $probe = Test-Torch
 
-    if (-not $torchOk) {
-        Write-Log 'Installing torch (CUDA 12.1 build)'
-        & $VenvPython -m pip install torch --index-url https://download.pytorch.org/whl/cu121 --quiet
-        $probe = & $VenvPython -c "import torch,sys; sys.stdout.write(f'{torch.__version__}|{torch.cuda.is_available()}')" 2>$null
-        Write-Log "torch reports: $probe"
-        Write-DepRecord -Name 'torch' -Version "$probe" -Source 'pytorch cu121 index' -Installed $true
-        if ($probe -notmatch '\|True$') {
-            Write-Log 'torch cannot see the GPU. Embedding will fall back to CPU.' 'WARN'
+    if ($probe -match '\|True$') {
+        Write-Log "torch with CUDA already present ($probe)"
+        Write-DepRecord -Name 'torch' -Version "$probe" -Source 'pre-existing' -AlreadyPresent $true
+    }
+    else {
+        $indexes = @(
+            @{ Name = 'cu124'; Url = 'https://download.pytorch.org/whl/cu124' },
+            @{ Name = 'cu121'; Url = 'https://download.pytorch.org/whl/cu121' }
+        )
+
+        $installed = $false
+        foreach ($index in $indexes) {
+            Write-Log "Installing torch ($($index.Name) build); this download is large"
+            if (Invoke-PipInstall -Label "torch $($index.Name)" `
+                    -PipArgs @('torch', '--index-url', $index.Url, '--quiet')) {
+                $probe = Test-Torch
+                Write-Log "torch reports: $probe"
+                if ($probe -match '\|True$') {
+                    Write-DepRecord -Name 'torch' -Version "$probe" `
+                        -Source "pytorch $($index.Name) index" -Installed $true `
+                        -Extra @{ cuda = $true }
+                    $installed = $true
+                    break
+                }
+                Write-Log "torch installed from $($index.Name) but cannot see the GPU." 'WARN'
+            }
+        }
+
+        if (-not $installed) {
+            Write-Log 'Falling back to the default (CPU) torch wheel.' 'WARN'
+            Invoke-PipInstall -PipArgs @('torch', '--quiet') -Label 'torch cpu' | Out-Null
+            $probe = Test-Torch
+            Write-Log "torch reports: $probe"
+            Write-DepRecord -Name 'torch' -Version "$probe" -Source 'pypi (cpu)' `
+                -Installed $true -Extra @{ cuda = $false }
+            Write-Log 'Embedding will run on CPU. Indexing still works, just slower.' 'WARN'
         }
     }
 
+    # sentence-transformers depends on torch. Installing it after torch means
+    # pip sees the requirement satisfied and leaves the CUDA build in place.
     Write-Log 'Installing Python requirements'
-    & $VenvPython -m pip install -r (Join-Path $Root 'requirements-windows.txt') --quiet
-    Write-DepRecord -Name 'python-requirements' -Source 'requirements-windows.txt' -Installed $true
+    if (Invoke-PipInstall -Label 'requirements' `
+            -PipArgs @('-r', (Join-Path $Root 'requirements-windows.txt'), '--quiet')) {
+        Write-DepRecord -Name 'python-requirements' -Source 'requirements-windows.txt' -Installed $true
+    } else {
+        throw 'Could not install the Python requirements. See the messages above.'
+    }
+
+    # Confirm torch survived the requirements install.
+    $final = Test-Torch
+    if ($final -notmatch '\|True$') {
+        Write-Log "torch after requirements: $final (GPU not available)" 'WARN'
+    }
 }
 
 function Test-WhisperGpu {
@@ -236,8 +398,9 @@ except Exception as exc:
 
     $probeFile = Join-Path $StateDir 'gpu_probe.py'
     [System.IO.File]::WriteAllText($probeFile, $probe, (New-Object System.Text.UTF8Encoding($false)))
-    $result = & $VenvPython $probeFile 2>&1 | Out-String
+    $run = Invoke-Native -FilePath $VenvPython -Arguments @('-W', 'ignore', $probeFile)
     Remove-Item $probeFile -ErrorAction SilentlyContinue
+    $result = "$($run.StdOut) $($run.StdErr)"
 
     if ($result -match 'GPU_OK') {
         Write-Log 'faster-whisper GPU mode confirmed'
@@ -365,11 +528,24 @@ function Invoke-Worker {
         throw "Virtual environment missing. Run: .\Mosaic-NightJob.ps1 -Action EnsureDeps"
     }
 
-    $argv = @('-m', $Module) + $Arguments
+    # -X utf8 because sermon titles and verse text are full of curly quotes and
+    # dashes. On a cp1252 console, printing one of those raises
+    # UnicodeEncodeError and takes the worker down mid-batch.
+    $argv = @('-X', 'utf8', '-m', $Module) + $Arguments
     Write-Verbose ("python " + ($argv -join ' '))
 
-    & $VenvPython @argv
-    $code = $LASTEXITCODE
+    # Workers stream progress for hours, so they run inline rather than being
+    # captured. 'Continue' is what stops an ordinary library warning on stderr
+    # from aborting the whole night job.
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        & $VenvPython @argv
+        $code = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $previous
+    }
 
     if ($code -ne 0) {
         Write-Log "$Module exited with code $code" 'WARN'
