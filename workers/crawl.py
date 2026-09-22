@@ -17,7 +17,9 @@ from urllib.robotparser import RobotFileParser
 
 import requests
 
-from lib.pagetext import dedup_key, extract, is_listing_url, is_message_url
+from lib.pagetext import (
+    canonical_url, dedup_key, extract, is_listing_url, is_message_url,
+)
 from lib.state import Job, atomic_write_json, utcnow
 from workers.common import WorkerContext, base_parser, log
 
@@ -43,6 +45,9 @@ class Catalog:
                     self.entries[row["url"]] = row
 
     def add(self, url: str, source: str = "") -> bool:
+        # Canonicalise on the way in, so a page is queued once no matter how
+        # many filtered variants of it are linked around the site.
+        url = canonical_url(url)
         if url in self.entries:
             return False
         self._append({"url": url, "state": "queued",
@@ -93,6 +98,41 @@ def slug_for(url: str) -> str:
     return "-".join(parts)[:120] or "index"
 
 
+def in_scope(url: str, content_paths: set[str], scope: str) -> bool:
+    """Decide whether a discovered link is worth queueing.
+
+    The whole sermon corpus hangs off /messages/, and the archive lists every
+    series on one page, so there is no reason to walk the rest of the site to
+    find it. Following everything meant queueing hundreds of pages like
+    /kids/ and /join-the-story/ and crawling them ahead of any sermon.
+
+    Pages outside /messages/ are included only when named in ContentPaths.
+    """
+    if scope != "messages":
+        return True
+    path = urlparse(url).path.rstrip("/")
+    if path.startswith("/messages"):
+        return True
+    return path in content_paths
+
+
+def crawl_priority(url: str, belief_paths: set[str]) -> int:
+    """Visit order. Lower runs first.
+
+    Without this the crawl is breadth-first over whatever the home page links
+    to, so it spends its time on /kids/ and /join-the-story/ and never reaches
+    a sermon. The archive and series indexes come first because they are what
+    enumerate the messages; the messages themselves come next.
+    """
+    if is_listing_url(url):
+        return 0
+    if is_message_url(url):
+        return 1
+    if urlparse(url).path.rstrip("/") in belief_paths:
+        return 2
+    return 3
+
+
 def main() -> int:
     parser = base_parser("Crawl thisismosaic.org")
     parser.add_argument("--single", default=None, help="Queue one URL and stop")
@@ -101,6 +141,12 @@ def main() -> int:
     parser.add_argument("--refresh-listings", action="store_true",
                         help="Re-queue archive and series pages to find new "
                              "messages. Pass once per run, not once per batch.")
+    parser.add_argument("--listings-only", action="store_true",
+                        help="Discovery phase: fetch only the archive and "
+                             "series pages, which enumerate the messages.")
+    parser.add_argument("--messages-only", action="store_true",
+                        help="Processing phase: fetch only message and content "
+                             "pages, leaving listings alone.")
     args = parser.parse_args()
 
     with WorkerContext(args) as ctx:
@@ -110,6 +156,12 @@ def main() -> int:
         user_agent = site["UserAgent"]
         deny = list(site.get("DenyPatterns", []))
         belief_paths = {p.rstrip("/") for p in site.get("BeliefPaths", [])}
+        exclude_campuses = {c.lower() for c in site.get("ExcludeCampuses", [])}
+        scope = site.get("FollowScope", "messages")
+        content_paths = {p.rstrip("/") for p in site.get("ContentPaths", [])}
+        if exclude_campuses:
+            log(f"Excluding campus(es): {', '.join(sorted(exclude_campuses))}")
+        log(f"Link scope: {scope}")
         audio_hosts = list(site.get("AudioHosts", []))
         delay_min = float(site.get("DelaySecondsMin", 2.0))
         delay_max = float(site.get("DelaySecondsMax", 5.0))
@@ -125,9 +177,12 @@ def main() -> int:
             "Accept-Language": "en-US,en;q=0.9",
         })
 
+        only = canonical_url(args.single) if args.single else None
+
         if args.single:
-            catalog.add(args.single, source="manual")
-            log(f"Queued {args.single}")
+            catalog.add(only, source="manual")
+            catalog.mark(only, "queued", "manual")
+            log(f"Fetching just {only}")
 
         elif not catalog.entries:
             for path in site["SeedPaths"]:
@@ -160,13 +215,34 @@ def main() -> int:
 
         processed = 0
         discovered_messages = 0
-        frontier = catalog.queued()
 
-        while frontier:
+        while True:
             if ctx.should_stop(processed):
                 break
 
-            url = frontier.pop(0)
+            # Pick the best remaining URL from the catalog each time rather
+            # than holding a local list. A local list was also a bug: several
+            # paths below `continue`, which skipped the refill and ended the
+            # crawl early while URLs were still queued.
+            queued = catalog.queued()
+
+            if only:
+                # --single means this URL and nothing else. Without the
+                # filter it fell through to the normal priority queue and
+                # crawled whatever was next instead of the page asked for.
+                queued = [u for u in queued if u == only]
+            elif args.listings_only:
+                # Enumerate the messages without fetching them. Fetching all
+                # ~1100 detail pages up front would mean an hour before the
+                # first audio download.
+                queued = [u for u in queued if is_listing_url(u)]
+            elif args.messages_only:
+                queued = [u for u in queued if not is_listing_url(u)]
+
+            if not queued:
+                break
+
+            url = min(queued, key=lambda u: (crawl_priority(u, belief_paths), u))
 
             if not same_site(url, base_netloc):
                 catalog.mark(url, "skipped", "offsite")
@@ -200,23 +276,60 @@ def main() -> int:
             page = extract(response.text, url, audio_hosts=audio_hosts)
             processed += 1
 
-            # Queue newly found in-domain links.
+            # Campus filter. Applied after extraction because the campus is
+            # only known from the page itself (speaker prefix or audio file
+            # suffix), not from the URL.
+            if is_message_url(url) and page.campus in exclude_campuses:
+                catalog.mark(url, "skipped", f"campus {page.campus} excluded")
+                log(f"  skip {page.campus.upper()}: {page.title}")
+                time.sleep(random.uniform(delay_min, delay_max))
+                continue
+
+            # Queue newly found in-domain links that are in scope.
+            added = 0
             for link in page.links:
-                if same_site(link, base_netloc) and allowed(link, robots, user_agent, deny):
-                    catalog.add(link, source=url)
+                if not same_site(link, base_netloc):
+                    continue
+                if not allowed(link, robots, user_agent, deny):
+                    continue
+                if not in_scope(link, content_paths, scope):
+                    continue
+                if catalog.add(link, source=url):
+                    added += 1
 
             path_key = urlparse(url).path.rstrip("/")
             is_belief = path_key in belief_paths
             is_message = is_message_url(url)
+
+            # Listing pages are scaffolding. The archive, its per-year views,
+            # and the series indexes exist to yield links; their body is a list
+            # of series titles with no teaching in it. Their links have already
+            # been harvested above, so stop here rather than indexing site
+            # navigation alongside sermons.
+            if is_listing_url(url):
+                catalog.mark(url, "fetched", "listing: links harvested")
+                # Log it: a silent crawl gives no way to tell progress from
+                # a hang, and the listing phase runs for several minutes.
+                parsed_label = urlparse(url)
+                label = (parsed_label.path.rstrip("/") or "/")
+                if parsed_label.query:
+                    label += "?" + parsed_label.query
+                log(f"  listing {label}  (+{added} link(s), "
+                    f"{len(catalog.queued())} queued)")
+                time.sleep(random.uniform(delay_min, delay_max))
+                continue
 
             if not (is_message or is_belief or page.body):
                 catalog.mark(url, "fetched", "no usable body")
                 time.sleep(random.uniform(delay_min, delay_max))
                 continue
 
-            # Identity is date + campus + audio, never the page URL: the same
-            # sermon is published under more than one series path.
-            key = dedup_key(page.date, page.campus, page.audio_url) if is_message else f"page:{path_key}"
+            # Sermons are identified by date + campus + audio, never by page
+            # URL, because the same sermon is published under more than one
+            # series path. Other pages are identified by their canonical URL,
+            # so two genuinely different pages under one path stay distinct.
+            key = (dedup_key(page.date, page.campus, page.audio_url)
+                   if is_message else f"page:{canonical_url(url)}")
             existing = ctx.jobs.by_key(key)
 
             if existing and not ctx.force:
@@ -264,9 +377,6 @@ def main() -> int:
                     break
 
             time.sleep(random.uniform(delay_min, delay_max))
-
-            if not frontier:
-                frontier = catalog.queued()
 
         remaining = len(catalog.queued())
         log(f"Crawl finished: {processed} fetched this run, "

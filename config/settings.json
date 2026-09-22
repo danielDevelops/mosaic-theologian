@@ -15,11 +15,21 @@
     "DelaySecondsMax": 5.0,
     "TimeoutSeconds": 45,
     "SeedPaths": [
-      "/",
+      "/messages/archive/",
       "/messages/",
-      "/messages/archive",
       "/about/core-beliefs/",
       "/about/mission-vision-values/",
+      "/about/our-story/",
+      "/resources/"
+    ],
+
+    "FollowScope": "messages",
+
+    "ContentPaths": [
+      "/about/core-beliefs/",
+      "/about/mission-vision-values/",
+      "/about/our-story/",
+      "/about/pastors-and-leaders/",
       "/resources/"
     ],
     "BeliefPaths": [
@@ -29,12 +39,15 @@
     "DenyPatterns": [
       "/calendar/",
       "/community-groups/join-a-group/",
+      "/mosaic-at-wdw/",
       "/wp-admin",
       "/wp-login",
       "/feed",
       "?share=",
       "?replytocom="
     ],
+
+    "ExcludeCampuses": ["wdw"],
     "AudioHosts": [
       "podcast.thisismosaic.org"
     ]

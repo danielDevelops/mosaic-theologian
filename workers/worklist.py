@@ -15,13 +15,20 @@ import json
 from pathlib import Path
 
 from lib.config import Paths, load_settings
+from lib.pagetext import is_listing_url
 from lib.state import JobStore
 
 
-def count_queued(catalog_path: Path) -> int:
-    """Catalog is append-only, so replay it and keep the last state per URL."""
+def count_queued(catalog_path: Path) -> tuple[int, int]:
+    """Replay the append-only catalog and split what is still queued.
+
+    Listings and messages are counted separately because they belong to
+    different phases: listings are discovery, messages are work the
+    processing loop can act on.
+    """
     if not catalog_path.is_file():
-        return 0
+        return 0, 0
+
     latest: dict[str, str] = {}
     with open(catalog_path, encoding="utf-8") as handle:
         for line in handle:
@@ -33,7 +40,16 @@ def count_queued(catalog_path: Path) -> int:
             except json.JSONDecodeError:
                 continue
             latest[row["url"]] = row.get("state", "")
-    return sum(1 for state in latest.values() if state == "queued")
+
+    listings = messages = 0
+    for url, state in latest.items():
+        if state != "queued":
+            continue
+        if is_listing_url(url):
+            listings += 1
+        else:
+            messages += 1
+    return listings, messages
 
 
 def main() -> int:
@@ -61,7 +77,8 @@ def main() -> int:
     )
     failed = sum(1 for j in jobs if j.status == "failed")
 
-    crawl_queued = count_queued(paths.state / "catalog.jsonl")
+    queued_listings, queued_messages = count_queued(paths.state / "catalog.jsonl")
+    crawl_queued = queued_listings + queued_messages
 
     manifest_path = paths.index / "index-manifest.json"
     scripture_rows = 0
@@ -77,6 +94,8 @@ def main() -> int:
 
     payload = {
         "crawl_queued": crawl_queued,
+        "queued_listings": queued_listings,
+        "queued_messages": queued_messages,
         "need_audio": need_audio,
         "need_transcribe": need_transcribe,
         "need_index": need_index,
@@ -84,8 +103,14 @@ def main() -> int:
         "failed": failed,
         "jobs": len(jobs),
         "scripture_rows": scripture_rows,
-        # Failed items are excluded: they are retried, but they must not keep
-        # the loop spinning forever when they cannot succeed.
+        # What the processing loop can act on. Queued *messages* count,
+        # because fetching one is the first step of a batch. Queued
+        # *listings* do not: those belong to the discovery phase, and
+        # counting them would spin the loop with nothing to process.
+        # Failed items are excluded, since retrying them forever would
+        # never reduce the count.
+        "processable": (queued_messages + need_audio + need_transcribe
+                        + need_index + bible_pending),
         "total": crawl_queued + need_audio + need_transcribe + need_index + bible_pending,
     }
 

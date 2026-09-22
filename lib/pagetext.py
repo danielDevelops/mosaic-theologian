@@ -12,7 +12,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
-from urllib.parse import urljoin, urlparse
+from urllib.parse import parse_qsl, urlencode, urljoin, urlparse
 
 from bs4 import BeautifulSoup
 
@@ -115,6 +115,32 @@ def is_message_url(url: str) -> bool:
     if len(parts) < 3:
         return False
     return parts[1] not in {"archive", "series"}
+
+
+def canonical_url(url: str) -> str:
+    """Collapse URL variants that address the same page.
+
+    Series pages are linked three ways: bare, ?location=wg, and
+    ?location=wdw. They are one page under a filter, not three pages, and the
+    links we harvest are the same. Without collapsing them the crawler pays a
+    separate HTTP fetch for each variant and then throws two away, which turns
+    103 series pages into 309 requests before it reaches a single sermon.
+
+    Identity is the path. Query keys that only filter a view are dropped;
+    anything else is preserved so genuinely distinct pages stay distinct.
+    """
+    parsed = urlparse(url.split("#")[0])
+    view_only = {"location", "_", "share", "replytocom", "fbclid", "utm_source",
+                 "utm_medium", "utm_campaign"}
+
+    kept = [(k, v) for k, v in parse_qsl(parsed.query, keep_blank_values=False)
+            if k.lower() not in view_only]
+
+    path = parsed.path.rstrip("/") or "/"
+    rebuilt = f"{parsed.scheme}://{parsed.netloc.lower()}{path}"
+    if kept:
+        rebuilt += "?" + urlencode(sorted(kept))
+    return rebuilt
 
 
 def is_listing_url(url: str) -> bool:

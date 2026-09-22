@@ -54,17 +54,23 @@ A run does three things in order.
 **1. Repair and one-shot stages.** Reconcile state against what is actually on
 disk, then normalise Scripture if that has not been done.
 
-**2. Discovery.** Re-queue the archive and the series index pages and crawl
-them. This is what finds newly published messages. Message detail pages are
-never re-fetched, because they do not change once published.
+**2. Discovery, once.** Crawl the archive and the series index pages only.
+[/messages/archive/](https://thisismosaic.org/messages/archive/) lists all 103
+series on one page, so this enumerates every message in about 120 requests.
+Message detail pages are deliberately *not* fetched here. Fetching all ~1,100
+of them up front would mean an hour before the first audio download.
+
+This phase is also what finds newly published messages, because listing pages
+gain links over time. Message pages are never re-fetched, since they do not
+change once published.
 
 **3. The work loop.** Cycle until the work is done or the clock runs out. Each
-cycle takes one batch all the way through:
+batch is self-contained, carrying its own messages from page to index:
 
 ```
-crawl a batch  ->  download its audio  ->  transcribe  ->  index
-        ^                                                    |
-        +------------------ next cycle ----------------------+
+fetch N message pages -> download their audio -> transcribe -> index
+        ^                                                        |
+        +--------------------- next batch -----------------------+
 ```
 
 Indexing at the end of every cycle is deliberate. Each completed batch is

@@ -622,14 +622,15 @@ function Get-WorkLeft {
 
 function Format-WorkLeft {
     param($Work)
-    return ('queued={0} audio={1} transcribe={2} index={3}' -f
-        $Work.crawl_queued, $Work.need_audio, $Work.need_transcribe, $Work.need_index)
+    return ('messages={0} audio={1} transcribe={2} index={3}' -f
+        $Work.queued_messages, $Work.need_audio, $Work.need_transcribe, $Work.need_index)
 }
 
 function Get-WorkSignature {
     param($Work)
-    return ('{0}|{1}|{2}|{3}' -f
-        $Work.crawl_queued, $Work.need_audio, $Work.need_transcribe, $Work.need_index)
+    return ('{0}|{1}|{2}|{3}|{4}' -f
+        $Work.queued_listings, $Work.queued_messages,
+        $Work.need_audio, $Work.need_transcribe, $Work.need_index)
 }
 
 # ------------------------------------------------------------------- lock --
@@ -705,37 +706,36 @@ function Invoke-Run {
             -Arguments (@('--single', $Url) + $common) | Out-Null
     }
     else {
-        # Once per run, before any work-is-there check: re-queue the archive
-        # and series pages. Every URL is marked fetched after the first full
-        # crawl, so without this the queue is empty, the loop concludes there
-        # is nothing to do, and a new sermon is never found.
-        Write-Section 'Discovery'
-        $refreshBatch = [Math]::Max($BatchSize, 250)
-        $refreshArgs = @('--refresh-listings', '--batch-size', "$refreshBatch") +
-                       $deadline + $common
-        if ($MaxPages -gt 0) { $refreshArgs += @('--max-pages', "$MaxPages") }
-        Invoke-Worker -Module 'workers.crawl' -Arguments $refreshArgs | Out-Null
+        # ONE crawl, run to completion. batch-size 0 means no item cap, so it
+        # drains the whole queue; only the deadline and -MaxPages stop it.
+        #
+        # --refresh-listings re-queues the archive and series pages. After the
+        # first full crawl every URL is marked fetched, so without it the queue
+        # starts empty and a newly published sermon is never discovered.
+        Write-Section 'Phase 1: discovery (archive and series pages only)'
+        Write-Log 'Enumerating the messages. Detail pages are NOT fetched here;'
+        Write-Log 'each batch fetches its own, so audio starts flowing sooner.'
 
-        if ($DiscoverFirst) {
-            # Enumerate the rest of the site before transcribing anything.
-            # Costs hours on a first run, but the full work list is then known.
-            $sweep = 0
-            while (-not (Test-OutOfTime $stopTime)) {
-                $work = Get-WorkLeft
-                if ($null -eq $work -or [int]$work.crawl_queued -le 0) { break }
-                $sweep++
-                Write-Log "Discovery pass $sweep : $($work.crawl_queued) URL(s) queued"
-                Invoke-Worker -Module 'workers.crawl' `
-                    -Arguments (@('--batch-size', '250') + $deadline + $common) | Out-Null
+        $crawlArgs = @('--refresh-listings', '--listings-only',
+                       '--batch-size', '0') + $deadline + $common
+        Invoke-Worker -Module 'workers.crawl' -Arguments $crawlArgs | Out-Null
+
+        $afterCrawl = Get-WorkLeft
+        if ($null -ne $afterCrawl) {
+            Write-Log ''
+            Write-Log "Discovery done. $($afterCrawl.queued_messages) message(s) found."
+            if ([int]$afterCrawl.queued_listings -gt 0) {
+                Write-Log "$($afterCrawl.queued_listings) listing page(s) left; they resume next run."
             }
         }
     }
 
-    # The work loop. Each cycle takes one batch all the way through:
-    # crawl -> download -> transcribe -> index. Indexing at the end of every
-    # cycle means a killed run still leaves the completed batches searchable,
-    # rather than losing a night of transcription that was never indexed.
-    Write-Section 'Work loop'
+    # The work loop. Crawling is finished by this point; each cycle now takes
+    # one batch of already-discovered messages all the way through:
+    # download -> transcribe -> index. Indexing at the end of every cycle means
+    # a killed run still leaves its completed batches searchable, rather than
+    # losing a night of transcription that was never written to the index.
+    Write-Section 'Processing loop (download, transcribe, index)'
     $cycle = 0
     $lastSignature = ''
     $stalled = 0
@@ -755,21 +755,23 @@ function Invoke-Run {
             Write-Log 'Stopping: could not determine remaining work.' 'WARN'
             break
         }
-        if ([int]$work.total -le 0) {
-            Write-Log 'Everything discovered so far is downloaded, transcribed, and indexed.'
+        if ([int]$work.processable -le 0) {
+            Write-Log 'Everything discovered is downloaded, transcribed, and indexed.'
             break
         }
 
         $cycle++
         Write-Log ''
-        Write-Log "--- cycle $cycle | $(Format-WorkLeft $work) ---"
+        Write-Log "--- batch $cycle | $(Format-WorkLeft $work) ---"
 
-        # 1. Discovery keeps the queue fed. Crawling a page takes seconds while
-        #    transcribing takes minutes, so this naturally runs ahead.
-        if (-not $Url -and [int]$work.crawl_queued -gt 0) {
-            $crawlArgs = @('--batch-size', "$BatchSize") + $deadline + $common
-            if ($MaxPages -gt 0) { $crawlArgs += @('--max-pages', "$MaxPages") }
-            Invoke-Worker -Module 'workers.crawl' -Arguments $crawlArgs | Out-Null
+        # 1. Fetch this batch's message pages. Discovery already enumerated
+        #    them; this is where the detail page is actually read, so a batch
+        #    is self-contained from page through to index.
+        if (-not $Url -and [int]$work.queued_messages -gt 0) {
+            $batchCrawl = @('--messages-only', '--batch-size', "$BatchSize") +
+                          $deadline + $common
+            if ($MaxPages -gt 0) { $batchCrawl += @('--max-pages', "$MaxPages") }
+            Invoke-Worker -Module 'workers.crawl' -Arguments $batchCrawl | Out-Null
         }
 
         # 2. Fetch this batch's audio.
@@ -784,7 +786,7 @@ function Invoke-Run {
                 -Arguments (@('--batch-size', "$BatchSize") + $deadline + $common) | Out-Null
         }
 
-        # 4. Index what this cycle produced, so the batch is queryable now.
+        # 4. Index what this batch produced, so it is queryable now.
         Invoke-Worker -Module 'workers.index_build' `
             -Arguments ($deadline + $common) | Out-Null
 
