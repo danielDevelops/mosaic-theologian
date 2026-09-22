@@ -55,7 +55,9 @@ class Catalog:
         return True
 
     def mark(self, url: str, state: str, note: str = "") -> None:
-        self._append({"url": url, "state": state, "note": note,
+        # Canonicalise here too. add() already does, so marking a raw URL
+        # would write a second entry that add() can never match.
+        self._append({"url": canonical_url(url), "state": state, "note": note,
                       "updated": utcnow()})
 
     def _append(self, row: dict) -> None:
@@ -197,10 +199,15 @@ def main() -> int:
             requeued = 0
 
             for path in site["SeedPaths"]:
-                url = urljoin(base + "/", path.lstrip("/"))
+                # Canonicalise before the lookup: add() stores the canonical
+                # form, so checking the raw seed URL raised KeyError and took
+                # the whole discovery phase down.
+                url = canonical_url(urljoin(base + "/", path.lstrip("/")))
                 if catalog.add(url, source="seed"):
                     requeued += 1
-                elif catalog.entries[url].get("state") != "queued":
+                    continue
+                entry = catalog.entries.get(url)
+                if entry is not None and entry.get("state") != "queued":
                     catalog.mark(url, "queued", "revisit")
                     requeued += 1
 

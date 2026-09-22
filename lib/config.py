@@ -14,6 +14,17 @@ from typing import Any
 
 
 def find_root(start: Path | None = None) -> Path:
+    # MOSAIC_ROOT lets the test harness point state and data at a throwaway
+    # directory while still importing the real code.
+    override = os.environ.get("MOSAIC_ROOT")
+    if override:
+        root = Path(override).resolve()
+        if (root / "config" / "settings.json").is_file():
+            return root
+        raise FileNotFoundError(
+            f"MOSAIC_ROOT={root} has no config/settings.json"
+        )
+
     here = (start or Path(__file__).resolve()).resolve()
     for candidate in [here, *here.parents]:
         if (candidate / "config" / "settings.json").is_file():

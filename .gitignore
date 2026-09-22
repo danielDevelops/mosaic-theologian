@@ -20,6 +20,9 @@ state/*.pid
 # Export bundles
 mosaic-portable/
 
+# Captured page fixtures are a local test cache, not source.
+tests/fixtures/
+
 # Python
 .venv/
 __pycache__/
