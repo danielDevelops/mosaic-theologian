@@ -37,7 +37,30 @@ def main() -> int:
         if job.audio_url:
             with_audio += 1
 
-    log(f"Jobs: {len(jobs):,} total, {with_audio:,} with audio")
+    audio_on_disk = (
+        len(list(paths.audio.glob("*.mp3"))) if paths.audio.is_dir() else 0
+    )
+    transcripts_on_disk = (
+        len(list(paths.transcripts.glob("*.json")))
+        if paths.transcripts.is_dir() else 0
+    )
+    waiting = [
+        j for j in jobs
+        if not j.at_least("transcribed")
+        and (
+            (j.audio_path and (paths.root / j.audio_path).is_file())
+            or (paths.audio / f"{j.id}.mp3").is_file()
+        )
+    ]
+
+    log(f"Jobs: {len(jobs):,} total, {with_audio:,} with audio URL")
+    log(f"On disk: {audio_on_disk} audio file(s), {transcripts_on_disk} transcript(s)")
+    if waiting:
+        log(f"Ready to transcribe now: {len(waiting)}")
+        for job in waiting[:8]:
+            log(f"  - {job.date or '????-??-??'}  {job.title or job.id}")
+        if len(waiting) > 8:
+            log(f"  ... and {len(waiting) - 8} more")
     log("")
     log("  Pipeline stage        Count")
     log("  " + "-" * 32)

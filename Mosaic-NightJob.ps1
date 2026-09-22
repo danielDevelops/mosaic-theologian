@@ -88,6 +88,93 @@ function Write-Section {
     Write-Host ('=' * 70) -ForegroundColor DarkGray
 }
 
+# -------------------------------------------------------------- CUDA pin --
+
+function Import-DotEnv {
+    param([string] $Path = (Join-Path $Root '.env'))
+    if (-not (Test-Path $Path)) { return }
+    Get-Content -Path $Path -Encoding UTF8 | ForEach-Object {
+        $line = $_.Trim()
+        if (-not $line -or $line.StartsWith('#')) { return }
+        $eq = $line.IndexOf('=')
+        if ($eq -lt 1) { return }
+        $name = $line.Substring(0, $eq).Trim()
+        $value = $line.Substring($eq + 1).Trim().Trim('"').Trim("'")
+        Set-Item -Path "Env:$name" -Value $value
+    }
+}
+
+function Find-CudaToolkit {
+    param([string] $Version)
+    $base = 'C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA'
+    if ($Version) {
+        $candidate = Join-Path $base ("v{0}" -f $Version)
+        if (Test-Path (Join-Path $candidate 'bin')) { return $candidate }
+    }
+    if (-not (Test-Path $base)) { return $null }
+    $dirs = Get-ChildItem $base -Directory -ErrorAction SilentlyContinue |
+        Sort-Object Name -Descending
+    foreach ($dir in $dirs) {
+        if ($dir.Name -like 'v12*' -and (Test-Path (Join-Path $dir.FullName 'bin'))) {
+            return $dir.FullName
+        }
+    }
+    if ($dirs) { return $dirs[0].FullName }
+    return $null
+}
+
+function Initialize-CudaEnv {
+    <#
+        Pin one CUDA toolkit on PATH. Two toolkits (or toolkit + leftover
+        CUDA 11 bins) is what makes faster-whisper fail to find cublas.
+        .env is the source of truth: CUDA_VERSION and CUDA_PATH.
+    #>
+    $envFile = Join-Path $Root '.env'
+    if (-not (Test-Path $envFile)) {
+        $example = Join-Path $Root '.env.example'
+        if (Test-Path $example) {
+            Copy-Item $example $envFile
+            Write-Log "Created .env from .env.example"
+        }
+    }
+
+    Import-DotEnv
+
+    $version = if ($env:CUDA_VERSION) { $env:CUDA_VERSION } else { '12.4' }
+    $env:CUDA_VERSION = $version
+
+    if (-not $env:CUDA_PATH -or -not (Test-Path $env:CUDA_PATH)) {
+        $found = Find-CudaToolkit $version
+        if ($found) { $env:CUDA_PATH = $found }
+    }
+
+    $kept = [System.Collections.Generic.List[string]]::new()
+    foreach ($part in ($env:PATH -split ';')) {
+        if (-not $part) { continue }
+        if ($part -match 'NVIDIA GPU Computing Toolkit\\CUDA') { continue }
+        $kept.Add($part)
+    }
+
+    $prepend = [System.Collections.Generic.List[string]]::new()
+    if ($env:CUDA_PATH) {
+        $bin = Join-Path $env:CUDA_PATH 'bin'
+        if (Test-Path $bin) { $prepend.Add($bin) }
+    }
+    $nvidiaRoot = Join-Path $VenvDir 'Lib\site-packages\nvidia'
+    foreach ($pkg in @('cublas', 'cudnn', 'cuda_runtime', 'cuda_nvrtc')) {
+        $pkgBin = Join-Path $nvidiaRoot "$pkg\bin"
+        if (Test-Path $pkgBin) { $prepend.Add($pkgBin) }
+    }
+
+    $env:PATH = (@($prepend) + @($kept)) -join ';'
+
+    if ($env:CUDA_PATH -and (Test-Path $env:CUDA_PATH)) {
+        Write-Log "CUDA pinned: version=$version  path=$($env:CUDA_PATH)"
+    } else {
+        Write-Log "CUDA_VERSION=$version (toolkit folder not found; using venv NVIDIA DLLs if present)" 'WARN'
+    }
+}
+
 # ------------------------------------------------------------- dep record --
 
 function Read-DepState {
@@ -622,8 +709,48 @@ function Get-WorkLeft {
 
 function Format-WorkLeft {
     param($Work)
-    return ('messages={0} audio={1} transcribe={2} index={3}' -f
-        $Work.queued_messages, $Work.need_audio, $Work.need_transcribe, $Work.need_index)
+    $next = if ($Work.PSObject.Properties['next_action']) { $Work.next_action } else { '?' }
+    $audioDisk = if ($Work.PSObject.Properties['audio_on_disk']) { $Work.audio_on_disk } else { '?' }
+    $txDisk = if ($Work.PSObject.Properties['transcripts_on_disk']) { $Work.transcripts_on_disk } else { '?' }
+    return ('next={0}  crawl={1}  download={2}  transcribe={3}  index={4}  | on disk: audio={5} transcripts={6}' -f
+        $next, $Work.queued_messages, $Work.need_audio, $Work.need_transcribe,
+        $Work.need_index, $audioDisk, $txDisk)
+}
+
+function Write-WorkBoard {
+    param($Work, [string] $Title = 'Queue')
+    if ($null -eq $Work) { return }
+    Write-Section $Title
+    Write-Log (Format-WorkLeft $Work)
+    switch ("$($Work.next_action)") {
+        'transcribe'     { Write-Log "Next: transcribe $($Work.need_transcribe) file(s) already on disk. No crawl, no new downloads." }
+        'index'          { Write-Log "Next: index $($Work.need_index) finished transcript(s)." }
+        'download'       { Write-Log "Next: download $($Work.need_audio) queued audio file(s). Transcribe queue is empty." }
+        'crawl_messages' { Write-Log "Next: fetch $($Work.queued_messages) message page(s)." }
+        'discover'       { Write-Log "Next: refresh listing pages for new messages." }
+        'bible'          { Write-Log 'Next: index Scripture.' }
+        'idle'           { Write-Log 'Next: nothing left.' }
+        default          { }
+    }
+}
+
+function Invoke-TranscribeDrain {
+    <#
+        Finish every audio file already on disk before touching crawl or
+        download. batch-size 0 means the worker keeps going until the
+        queue is empty or the deadline hits.
+    #>
+    param([string[]] $Deadline, [string[]] $Common)
+    Write-Section 'NOW: transcribe audio already on disk'
+    Write-Log 'Crawl and new downloads wait until this queue is empty.'
+    $code = Invoke-Worker -Module 'workers.transcribe' `
+        -Arguments (@('--batch-size', '0') + $Deadline + $Common)
+    if ($code -ne 0) {
+        Write-Log 'Transcription failed. Not crawling or downloading more until this is fixed.' 'ERROR'
+        Write-Log 'Pin CUDA in .env (CUDA_VERSION / CUDA_PATH) and re-run.' 'ERROR'
+        return $false
+    }
+    return $true
 }
 
 function Get-WorkSignature {
@@ -658,12 +785,14 @@ function Test-LockHeld {
 
 function Invoke-EnsureDeps {
     Write-Section 'Dependency bootstrap'
+    Initialize-CudaEnv
 
     Install-WithWinget -Id 'Python.Python.3.12' -Command 'python' -Friendly 'Python'   | Out-Null
     Install-WithWinget -Id 'Gyan.FFmpeg'        -Command 'ffmpeg' -Friendly 'ffmpeg'   | Out-Null
     Install-WithWinget -Id 'Git.Git'            -Command 'git'    -Friendly 'git'      | Out-Null
 
     Initialize-PythonEnv
+    Initialize-CudaEnv
     Test-WhisperGpu | Out-Null
     Resolve-BibleSource | Out-Null
     Get-ChatModelHint
@@ -685,6 +814,7 @@ function Invoke-Run {
     }
 
     Write-Section 'Nightly run'
+    Initialize-CudaEnv
     if ($Until)      { Write-Log "Will stop at $Until" }
     if ($MaxMinutes) { Write-Log "Will stop after $MaxMinutes minutes" }
 
@@ -693,49 +823,28 @@ function Invoke-Run {
     $common = @()
     if ($Force) { $common += '--force' }
 
-    # Stray .part files and state that ran ahead of its artifacts are both
-    # normal after a kill. Reconcile before doing any new work.
+    # Stray .part files, jobs that ran ahead of artifacts, and MP3s on
+    # disk that never got attached to a job.
     Invoke-Worker -Module 'workers.reconcile' | Out-Null
 
-    # Scripture is a one-shot: normalise it once, then never again.
     Invoke-Worker -Module 'workers.ingest_bible' -Arguments $common | Out-Null
+
+    $work = Get-WorkLeft
+    Write-WorkBoard $work 'What is queued right now'
 
     if ($Url) {
         Write-Log "Queueing single URL: $Url"
         Invoke-Worker -Module 'workers.crawl' `
             -Arguments (@('--single', $Url) + $common) | Out-Null
     }
-    else {
-        # ONE crawl, run to completion. batch-size 0 means no item cap, so it
-        # drains the whole queue; only the deadline and -MaxPages stop it.
-        #
-        # --refresh-listings re-queues the archive and series pages. After the
-        # first full crawl every URL is marked fetched, so without it the queue
-        # starts empty and a newly published sermon is never discovered.
-        Write-Section 'Phase 1: discovery (archive and series pages only)'
-        Write-Log 'Enumerating the messages. Detail pages are NOT fetched here;'
-        Write-Log 'each batch fetches its own, so audio starts flowing sooner.'
 
-        $crawlArgs = @('--refresh-listings', '--listings-only',
-                       '--batch-size', '0') + $deadline + $common
-        Invoke-Worker -Module 'workers.crawl' -Arguments $crawlArgs | Out-Null
-
-        $afterCrawl = Get-WorkLeft
-        if ($null -ne $afterCrawl) {
-            Write-Log ''
-            Write-Log "Discovery done. $($afterCrawl.queued_messages) message(s) found."
-            if ([int]$afterCrawl.queued_listings -gt 0) {
-                Write-Log "$($afterCrawl.queued_listings) listing page(s) left; they resume next run."
-            }
-        }
-    }
-
-    # The work loop. Crawling is finished by this point; each cycle now takes
-    # one batch of already-discovered messages all the way through:
-    # download -> transcribe -> index. Indexing at the end of every cycle means
-    # a killed run still leaves its completed batches searchable, rather than
-    # losing a night of transcription that was never written to the index.
-    Write-Section 'Processing loop (download, transcribe, index)'
+    # ------------------------------------------------------------------
+    # Existing work first. If audio is already on disk, transcribe it
+    # before any crawl or any new download. That is what makes a restart
+    # pick up the ~30 files sitting in data\audio instead of walking the
+    # archive again for twenty minutes.
+    # ------------------------------------------------------------------
+    $didDiscover = $false
     $cycle = 0
     $lastSignature = ''
     $stalled = 0
@@ -755,50 +864,86 @@ function Invoke-Run {
             Write-Log 'Stopping: could not determine remaining work.' 'WARN'
             break
         }
-        if ([int]$work.processable -le 0) {
+
+        $needTx    = [int]$work.need_transcribe
+        $needIdx   = [int]$work.need_index
+        $needDl    = [int]$work.need_audio
+        $needCrawl = [int]$work.queued_messages
+        $needList  = [int]$work.queued_listings
+
+        if ($needTx -le 0 -and $needIdx -le 0 -and $needDl -le 0 -and
+            $needCrawl -le 0 -and ($didDiscover -or $needList -le 0) -and
+            [int]$work.bible_pending -le 0 -and -not $Url) {
+            if (-not $didDiscover -and -not $Url) {
+                # No backlog. Look for newly published messages once.
+                Write-Section 'NOW: discovery (listings only; backlog was empty)'
+                $crawlArgs = @('--refresh-listings', '--listings-only',
+                               '--batch-size', '0') + $deadline + $common
+                Invoke-Worker -Module 'workers.crawl' -Arguments $crawlArgs | Out-Null
+                $didDiscover = $true
+                $work = Get-WorkLeft
+                Write-WorkBoard $work 'After discovery'
+                continue
+            }
             Write-Log 'Everything discovered is downloaded, transcribed, and indexed.'
             break
         }
 
         $cycle++
         Write-Log ''
-        Write-Log "--- batch $cycle | $(Format-WorkLeft $work) ---"
+        Write-Log "--- cycle $cycle | $(Format-WorkLeft $work) ---"
 
-        # 1. Fetch this batch's message pages. Discovery already enumerated
-        #    them; this is where the detail page is actually read, so a batch
-        #    is self-contained from page through to index.
-        if (-not $Url -and [int]$work.queued_messages -gt 0) {
+        # 1. Transcribe everything already on disk. Do not crawl or download.
+        if (-not $SkipTranscribe -and $needTx -gt 0) {
+            if (-not (Invoke-TranscribeDrain -Deadline $deadline -Common $common)) {
+                break
+            }
+            Invoke-Worker -Module 'workers.index_build' `
+                -Arguments ($deadline + $common) | Out-Null
+            Write-WorkBoard (Get-WorkLeft) 'After transcription'
+        }
+        elseif ($SkipTranscribe -and $needTx -gt 0) {
+            Write-Log 'Skipping transcription (-SkipTranscribe). Audio stays on disk.'
+        }
+        elseif ($needIdx -gt 0) {
+            Write-Section "NOW: index $($needIdx) item(s)"
+            Invoke-Worker -Module 'workers.index_build' `
+                -Arguments ($deadline + $common) | Out-Null
+        }
+        elseif ($needDl -gt 0) {
+            Write-Section "NOW: download $($needDl) queued audio file(s)"
+            Write-Log 'Transcribe queue is empty, so downloads may proceed.'
+            Invoke-Worker -Module 'workers.download_audio' `
+                -Arguments (@('--batch-size', "$BatchSize") + $deadline + $common) | Out-Null
+        }
+        elseif ($needCrawl -gt 0 -and -not $Url) {
+            Write-Section "NOW: fetch $needCrawl message page(s)"
             $batchCrawl = @('--messages-only', '--batch-size', "$BatchSize") +
                           $deadline + $common
             if ($MaxPages -gt 0) { $batchCrawl += @('--max-pages', "$MaxPages") }
             Invoke-Worker -Module 'workers.crawl' -Arguments $batchCrawl | Out-Null
         }
-
-        # 2. Fetch this batch's audio.
-        Invoke-Worker -Module 'workers.download_audio' `
-            -Arguments (@('--batch-size', "$BatchSize") + $deadline + $common) | Out-Null
-
-        # 3. Transcribe it.
-        if ($SkipTranscribe) {
-            Write-Log 'Skipping transcription (-SkipTranscribe)'
-        } else {
-            Invoke-Worker -Module 'workers.transcribe' `
-                -Arguments (@('--batch-size', "$BatchSize") + $deadline + $common) | Out-Null
+        elseif (-not $didDiscover -and -not $Url) {
+            Write-Section 'NOW: discovery (listings only)'
+            $crawlArgs = @('--refresh-listings', '--listings-only',
+                           '--batch-size', '0') + $deadline + $common
+            if ($DiscoverFirst) {
+                Write-Log '-DiscoverFirst: enumerate listings before processing new pages.'
+            }
+            Invoke-Worker -Module 'workers.crawl' -Arguments $crawlArgs | Out-Null
+            $didDiscover = $true
+            Write-WorkBoard (Get-WorkLeft) 'After discovery'
+        }
+        else {
+            Write-Log 'No matching action for the current queue; stopping.' 'WARN'
+            break
         }
 
-        # 4. Index what this batch produced, so it is queryable now.
-        Invoke-Worker -Module 'workers.index_build' `
-            -Arguments ($deadline + $common) | Out-Null
-
-        # Stall detection. Permanently failing items would otherwise keep the
-        # loop cycling all night without ever reducing the outstanding work.
         $after = Get-WorkLeft
         if ($null -eq $after) { break }
-
         $signature = Get-WorkSignature $after
         if ($signature -eq $lastSignature) { $stalled++ } else { $stalled = 0 }
         $lastSignature = $signature
-
         if ($stalled -ge 2) {
             Write-Log 'No progress across two consecutive cycles; stopping.' 'WARN'
             Write-Log 'Check Status for failed items; they are retried on the next run.' 'WARN'

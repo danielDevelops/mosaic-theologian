@@ -11,6 +11,8 @@ requests>=2.31
 beautifulsoup4>=4.12
 lxml>=5.0
 faster-whisper>=1.0.3
+nvidia-cublas-cu12
+nvidia-cudnn-cu12
 sentence-transformers>=3.0
 lancedb>=0.13
 pyarrow>=16.0

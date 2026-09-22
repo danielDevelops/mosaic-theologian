@@ -264,6 +264,7 @@ def main() -> int:
                 catalog.mark(url, "skipped", "robots or deny pattern")
                 continue
 
+            log(f"  fetch {url}")
             try:
                 response = session.get(url, timeout=timeout)
             except requests.RequestException as exc:

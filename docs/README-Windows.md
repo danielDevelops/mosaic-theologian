@@ -49,34 +49,24 @@ nights.
 .\Mosaic-NightJob.ps1 -Action Run -Until 06:00
 ```
 
-A run does three things in order.
+A run does existing work first, and only crawls when those queues are empty.
 
-**1. Repair and one-shot stages.** Reconcile state against what is actually on
-disk, then normalise Scripture if that has not been done.
+**1. Repair.** Reconcile state against disk, including MP3s already in
+`data\audio` that never got attached to a job.
 
-**2. Discovery, once.** Crawl the archive and the series index pages only.
-[/messages/archive/](https://thisismosaic.org/messages/archive/) lists all 103
-series on one page, so this enumerates every message in about 120 requests.
-Message detail pages are deliberately *not* fetched here. Fetching all ~1,100
-of them up front would mean an hour before the first audio download.
+**2. Drain what is already here.** If audio is waiting, transcribe all of it
+(and index) before any crawl or any new download. You will see `NOW:
+transcribe N file(s)` and a `START` / `DONE` line for each sermon. Transcripts
+stay in `data\transcripts`. Audio is deleted after each success.
 
-This phase is also what finds newly published messages, because listing pages
-gain links over time. Message pages are never re-fetched, since they do not
-change once published.
+**3. Then download, then crawl.** New MP3s are fetched only when the
+transcribe queue is empty. New message pages are fetched only when there is
+nothing left to download or transcribe. Listing-page discovery runs last, so
+a restart does not walk the archive again while 30 files sit untouched.
 
-**3. The work loop.** Cycle until the work is done or the clock runs out. Each
-batch is self-contained, carrying its own messages from page to index:
-
-```
-fetch N message pages -> download their audio -> transcribe -> index
-        ^                                                        |
-        +--------------------- next batch -----------------------+
-```
-
-Indexing at the end of every cycle is deliberate. Each completed batch is
-searchable immediately, so a run that gets killed at 3am still leaves
-everything it finished that night queryable, rather than losing a night of
-transcription that was never written to the index.
+CUDA is pinned in `.env` (`CUDA_VERSION` / `CUDA_PATH`). Other CUDA bins are
+stripped from PATH for this process so cublas/cudnn are not loaded from two
+places. If the GPU cannot load, the run stops instead of crawling for an hour.
 
 The loop stops when there is nothing left to do, when `-Until` is reached, or
 when two consecutive cycles make no progress at all. That last one is a guard
@@ -92,10 +82,9 @@ Useful flags:
 | `-SkipTranscribe` | Crawl and index page text only; leave the GPU alone. |
 | `-MaxPages 15` | Cap how many message pages discovery picks up. |
 
-`-DiscoverFirst` is the "enumerate everything, then process it" mode. It costs
-a couple of hours of crawling on a first run before any sermon is transcribed,
-so the default interleaves instead: discovery runs ahead on its own because
-fetching a page takes seconds while transcribing one takes minutes.
+Existing audio is always transcribed before discovery, including with
+`-DiscoverFirst`. That flag only changes what happens after the backlog is
+clear.
 
 Scheduled task:
 
@@ -145,10 +134,10 @@ working set well under the disk budget. Set `Audio.KeepAfterTranscribe` to
 .\Mosaic-NightJob.ps1 -Action Status
 ```
 
-Shows how many items sit at each pipeline stage, the scripture and index row
-counts, the embedding model identity, and anything that failed. Failures are
-retried on the next run rather than abandoned. Status can be run while a job
-is in progress.
+Shows how many items sit at each pipeline stage, how many audio files and
+transcripts are on disk, which sermons are ready to transcribe, the scripture
+and index row counts, and anything that failed. Failures are retried on the
+next run. Status can be run while a job is in progress.
 
 ## Exporting for the Mac
 

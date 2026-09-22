@@ -28,5 +28,6 @@ tests/fixtures/
 __pycache__/
 *.pyc
 
-# Secrets
+# Secrets and machine-local CUDA pin
 config/secrets.json
+.env

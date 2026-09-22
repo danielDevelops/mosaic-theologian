@@ -62,14 +62,27 @@ def main() -> int:
 
     jobs = list(JobStore(paths.state / "jobs.jsonl"))
 
+    audio_stems: set[str] = set()
+    if paths.audio.is_dir():
+        audio_stems = {p.stem for p in paths.audio.glob("*.mp3")}
+    transcripts_on_disk = (
+        len(list(paths.transcripts.glob("*.json")))
+        if paths.transcripts.is_dir() else 0
+    )
+
     need_audio = sum(
         1 for j in jobs
         if j.audio_url and not j.at_least("audio_downloaded")
         and not j.at_least("transcribed")
+        and j.id not in audio_stems
     )
     need_transcribe = sum(
         1 for j in jobs
-        if j.audio_path and not j.at_least("transcribed")
+        if not j.at_least("transcribed")
+        and (
+            (j.audio_path and (paths.root / j.audio_path).is_file())
+            or j.id in audio_stems
+        )
     )
     need_index = sum(
         1 for j in jobs
@@ -109,6 +122,18 @@ def main() -> int:
         # counting them would spin the loop with nothing to process.
         # Failed items are excluded, since retrying them forever would
         # never reduce the count.
+        "audio_on_disk": len(audio_stems),
+        "transcripts_on_disk": transcripts_on_disk,
+        # Drain existing work before crawling or downloading more.
+        "next_action": (
+            "transcribe" if need_transcribe else
+            "index" if need_index else
+            "download" if need_audio else
+            "crawl_messages" if queued_messages else
+            "discover" if queued_listings else
+            "bible" if bible_pending else
+            "idle"
+        ),
         "processable": (queued_messages + need_audio + need_transcribe
                         + need_index + bible_pending),
         "total": crawl_queued + need_audio + need_transcribe + need_index + bible_pending,

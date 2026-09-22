@@ -70,7 +70,8 @@
     "CpuComputeType": "int8",
     "Language": "en",
     "BeamSize": 5,
-    "VadFilter": true
+    "VadFilter": true,
+    "FailIfNoGpu": true
   },
 
   "Embedding": {

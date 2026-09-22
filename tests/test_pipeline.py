@@ -275,6 +275,56 @@ def scenario_resume(site: FixtureSite) -> None:
         box.cleanup()
 
 
+def scenario_attach_audio(site: FixtureSite) -> None:
+    print("\n8. Existing audio is attached and queued before crawl")
+    box = Sandbox(site.base_url)
+    try:
+        jobs_path = box.dir / "state" / "jobs.jsonl"
+        jobs_path.parent.mkdir(parents=True, exist_ok=True)
+        (box.dir / "data" / "audio").mkdir(parents=True, exist_ok=True)
+        row = {
+            "id": "ready-sermon",
+            "kind": "message",
+            "url": f"{site.base_url}/messages/hebrews/hebrews-4.14-16/",
+            "key": "audio:ready",
+            "step": "page_saved",
+            "status": "pending",
+            "title": "Ready sermon",
+            "audio_url": "http://example/ready.mp3",
+            "audio_path": "",
+            "alt_urls": [],
+            "scripture_refs": [],
+            "error": "",
+        }
+        jobs_path.write_text(json.dumps(row) + "\n", encoding="utf-8")
+        (box.dir / "data" / "audio" / "ready-sermon.mp3").write_bytes(
+            b"ID3" + (b"\x00" * 4096)
+        )
+
+        rec = box.run("workers.reconcile")
+        check("reconcile attaches on-disk audio", rec.returncode == 0,
+              rec.stderr[-200:])
+
+        jobs = box.jobs()
+        job = jobs.get("ready-sermon", {})
+        check("job advanced to audio_downloaded",
+              job.get("step") == "audio_downloaded",
+              f"step={job.get('step')}")
+        check("audio_path points at the file",
+              "ready-sermon.mp3" in (job.get("audio_path") or ""),
+              f"audio_path={job.get('audio_path')}")
+
+        work = box.worklist()
+        check("worklist says transcribe is next",
+              work.get("next_action") == "transcribe",
+              f"next={work.get('next_action')} work={work}")
+        check("need_transcribe counts the on-disk file",
+              work.get("need_transcribe") == 1,
+              f"need_transcribe={work.get('need_transcribe')}")
+    finally:
+        box.cleanup()
+
+
 def scenario_wdw_excluded(site: FixtureSite) -> None:
     print("\n7. WDW campus excluded")
     box = Sandbox(site.base_url)
@@ -311,6 +361,7 @@ def main() -> int:
         scenario_single_targeted(site)
         scenario_resume(site)
         scenario_wdw_excluded(site)
+        scenario_attach_audio(site)
 
     passed = sum(1 for _, ok, _ in results if ok)
     failed = [(n, d) for n, ok, d in results if not ok]

@@ -85,20 +85,27 @@ def main() -> int:
             log("No audio to download.")
             return 0
 
-        log(f"{len(candidates)} message(s) need audio.")
+        log(f"NOW: download {len(candidates)} audio file(s).")
         processed = 0
+        total = len(candidates)
 
         for job in candidates:
             if ctx.should_stop(processed):
+                log(f"Stopping with {total - processed} download(s) still queued.")
                 break
 
             target = ctx.paths.audio / f"{job.id}.mp3"
+            label = f"{job.date or '????-??-??'}  {job.title or job.id}"
 
             if target.exists() and target.stat().st_size >= min_bytes and not ctx.force:
                 job.audio_path = ctx.relative(target)
                 job.advance("audio_downloaded")
                 ctx.jobs.put(job)
+                log(f"  [{processed + 1}/{total}] already on disk  {label}")
+                processed += 1
                 continue
+
+            log(f"  [{processed + 1}/{total}] downloading  {label}")
 
             ok, error = download(session, job.audio_url, target,
                                  timeout, min_bytes, max_bytes)
