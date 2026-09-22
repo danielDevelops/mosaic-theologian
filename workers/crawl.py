@@ -17,7 +17,7 @@ from urllib.robotparser import RobotFileParser
 
 import requests
 
-from lib.pagetext import dedup_key, extract, is_message_url
+from lib.pagetext import dedup_key, extract, is_listing_url, is_message_url
 from lib.state import Job, atomic_write_json, utcnow
 from workers.common import WorkerContext, base_parser, log
 
@@ -98,6 +98,9 @@ def main() -> int:
     parser.add_argument("--single", default=None, help="Queue one URL and stop")
     parser.add_argument("--max-pages", type=int, default=0,
                         help="Stop after discovering this many message pages")
+    parser.add_argument("--refresh-listings", action="store_true",
+                        help="Re-queue archive and series pages to find new "
+                             "messages. Pass once per run, not once per batch.")
     args = parser.parse_args()
 
     with WorkerContext(args) as ctx:
@@ -125,10 +128,35 @@ def main() -> int:
         if args.single:
             catalog.add(args.single, source="manual")
             log(f"Queued {args.single}")
+
         elif not catalog.entries:
             for path in site["SeedPaths"]:
                 catalog.add(urljoin(base + "/", path.lstrip("/")), source="seed")
             log(f"Seeded {len(catalog.entries)} start URLs")
+
+        elif args.refresh_listings:
+            # Every URL is marked fetched after the first full crawl, so
+            # without this the frontier stays empty and a new sermon is never
+            # discovered. Re-queue only the pages that gain links over time;
+            # message pages do not change once published.
+            requeued = 0
+
+            for path in site["SeedPaths"]:
+                url = urljoin(base + "/", path.lstrip("/"))
+                if catalog.add(url, source="seed"):
+                    requeued += 1
+                elif catalog.entries[url].get("state") != "queued":
+                    catalog.mark(url, "queued", "revisit")
+                    requeued += 1
+
+            for url, row in list(catalog.entries.items()):
+                if row.get("state") == "queued":
+                    continue
+                if is_listing_url(url):
+                    catalog.mark(url, "queued", "revisit")
+                    requeued += 1
+
+            log(f"Re-queued {requeued} listing page(s) to look for new messages.")
 
         processed = 0
         discovered_messages = 0

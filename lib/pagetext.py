@@ -117,6 +117,22 @@ def is_message_url(url: str) -> bool:
     return parts[1] not in {"archive", "series"}
 
 
+def is_listing_url(url: str) -> bool:
+    """True for index pages that gain links when a sermon is published.
+
+    The archive, each series index, and the site root all change over time,
+    so they have to be re-fetched to discover new messages. Message detail
+    pages do not change once published and are never re-fetched.
+    """
+    path = urlparse(url).path.rstrip("/")
+    if path in ("", "/"):
+        return True
+    parts = [p for p in path.strip("/").split("/") if p]
+    if not parts or parts[0] != "messages":
+        return False
+    return not is_message_url(url)
+
+
 def campus_from_audio(audio_url: str) -> str:
     match = _AUDIO_SUFFIX_CAMPUS.search(audio_url or "")
     return match.group(2).lower() if match else ""

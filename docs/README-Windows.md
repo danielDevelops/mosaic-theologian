@@ -49,9 +49,47 @@ nights.
 .\Mosaic-NightJob.ps1 -Action Run -Until 06:00
 ```
 
-Stages run in order: reconcile, crawl, Bible ingest, audio download,
-transcribe, index. `-Until` is checked between items, so the job stops on an
-item boundary and leaves the GPU free during the day.
+A run does three things in order.
+
+**1. Repair and one-shot stages.** Reconcile state against what is actually on
+disk, then normalise Scripture if that has not been done.
+
+**2. Discovery.** Re-queue the archive and the series index pages and crawl
+them. This is what finds newly published messages. Message detail pages are
+never re-fetched, because they do not change once published.
+
+**3. The work loop.** Cycle until the work is done or the clock runs out. Each
+cycle takes one batch all the way through:
+
+```
+crawl a batch  ->  download its audio  ->  transcribe  ->  index
+        ^                                                    |
+        +------------------ next cycle ----------------------+
+```
+
+Indexing at the end of every cycle is deliberate. Each completed batch is
+searchable immediately, so a run that gets killed at 3am still leaves
+everything it finished that night queryable, rather than losing a night of
+transcription that was never written to the index.
+
+The loop stops when there is nothing left to do, when `-Until` is reached, or
+when two consecutive cycles make no progress at all. That last one is a guard
+against permanently failing items keeping the job spinning all night.
+
+Useful flags:
+
+| Flag | Effect |
+|---|---|
+| `-BatchSize 20` | Items per stage per cycle. Not a cap on the whole run. |
+| `-MaxCycles 5` | Stop after N cycles. Handy for a short test run. |
+| `-DiscoverFirst` | Crawl the entire site before transcribing anything. |
+| `-SkipTranscribe` | Crawl and index page text only; leave the GPU alone. |
+| `-MaxPages 15` | Cap how many message pages discovery picks up. |
+
+`-DiscoverFirst` is the "enumerate everything, then process it" mode. It costs
+a couple of hours of crawling on a first run before any sermon is transcribed,
+so the default interleaves instead: discovery runs ahead on its own because
+fetching a page takes seconds while transcribing one takes minutes.
 
 Scheduled task:
 

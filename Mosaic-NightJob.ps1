@@ -29,7 +29,16 @@ param(
     [string] $Until,
     [int]    $MaxMinutes,
 
+    # Items per stage per cycle. The run keeps cycling until the work is done
+    # or the deadline hits; this only sets how much each cycle bites off.
     [int]    $BatchSize = 20,
+
+    # Safety stop for the cycle loop. 0 means "until done or out of time".
+    [int]    $MaxCycles = 0,
+
+    # Crawl the whole site before transcribing anything, instead of
+    # interleaving discovery with processing.
+    [switch] $DiscoverFirst,
 
     # Export only.
     [string] $Destination,
@@ -560,6 +569,69 @@ function Get-DeadlineArgs {
     return $deadline
 }
 
+function Get-StopTime {
+    <#
+        The workers each honour the deadline internally, but the loop needs
+        its own copy of it. Otherwise it would happily start another cycle of
+        workers that all immediately exit, and spin until the batch counter
+        ran out.
+    #>
+    $stop = $null
+
+    if ($MaxMinutes) { $stop = (Get-Date).AddMinutes($MaxMinutes) }
+
+    if ($Until) {
+        $parts = $Until -split ':'
+        $hours = [int]$parts[0]
+        $minutes = if ($parts.Count -gt 1) { [int]$parts[1] } else { 0 }
+        $candidate = (Get-Date).Date.AddHours($hours).AddMinutes($minutes)
+        if ($candidate -le (Get-Date)) { $candidate = $candidate.AddDays(1) }
+        if ($null -eq $stop -or $candidate -lt $stop) { $stop = $candidate }
+    }
+
+    return $stop
+}
+
+function Test-OutOfTime {
+    param($StopTime)
+    if ($null -eq $StopTime) { return $false }
+    return (Get-Date) -ge $StopTime
+}
+
+function Get-WorkLeft {
+    <#
+        Ask the Python side what is still pending. Returns $null if the
+        question could not be answered, which the caller treats as "stop"
+        rather than guessing.
+    #>
+    $result = Invoke-Native -FilePath $VenvPython `
+        -Arguments @('-X', 'utf8', '-m', 'workers.worklist')
+
+    if ($result.ExitCode -ne 0 -or -not $result.StdOut) {
+        Write-Log "Could not read the work list: $($result.StdErr)" 'WARN'
+        return $null
+    }
+
+    try {
+        return $result.StdOut | ConvertFrom-Json
+    } catch {
+        Write-Log "Work list was not valid JSON: $($result.StdOut)" 'WARN'
+        return $null
+    }
+}
+
+function Format-WorkLeft {
+    param($Work)
+    return ('queued={0} audio={1} transcribe={2} index={3}' -f
+        $Work.crawl_queued, $Work.need_audio, $Work.need_transcribe, $Work.need_index)
+}
+
+function Get-WorkSignature {
+    param($Work)
+    return ('{0}|{1}|{2}|{3}' -f
+        $Work.crawl_queued, $Work.need_audio, $Work.need_transcribe, $Work.need_index)
+}
+
 # ------------------------------------------------------------------- lock --
 
 function Test-LockHeld {
@@ -616,6 +688,7 @@ function Invoke-Run {
     if ($MaxMinutes) { Write-Log "Will stop after $MaxMinutes minutes" }
 
     $deadline = Get-DeadlineArgs
+    $stopTime = Get-StopTime
     $common = @()
     if ($Force) { $common += '--force' }
 
@@ -623,36 +696,115 @@ function Invoke-Run {
     # normal after a kill. Reconcile before doing any new work.
     Invoke-Worker -Module 'workers.reconcile' | Out-Null
 
-    if ($Url) {
-        Write-Log "Queueing single URL: $Url"
-        Invoke-Worker -Module 'workers.crawl' -Arguments (@('--single', $Url) + $common) | Out-Null
-    }
-    else {
-        Write-Log 'Step 1/5  crawl site'
-        $crawlArgs = @('--batch-size', "$BatchSize") + $deadline + $common
-        if ($MaxPages -gt 0) { $crawlArgs += @('--max-pages', "$MaxPages") }
-        Invoke-Worker -Module 'workers.crawl' -Arguments $crawlArgs | Out-Null
-    }
-
-    Write-Log 'Step 2/5  ingest Bible'
+    # Scripture is a one-shot: normalise it once, then never again.
     Invoke-Worker -Module 'workers.ingest_bible' -Arguments $common | Out-Null
 
-    Write-Log 'Step 3/5  download audio'
-    Invoke-Worker -Module 'workers.download_audio' `
-        -Arguments (@('--batch-size', "$BatchSize") + $deadline + $common) | Out-Null
+    if ($Url) {
+        Write-Log "Queueing single URL: $Url"
+        Invoke-Worker -Module 'workers.crawl' `
+            -Arguments (@('--single', $Url) + $common) | Out-Null
+    }
+    else {
+        # Once per run, before any work-is-there check: re-queue the archive
+        # and series pages. Every URL is marked fetched after the first full
+        # crawl, so without this the queue is empty, the loop concludes there
+        # is nothing to do, and a new sermon is never found.
+        Write-Section 'Discovery'
+        $refreshBatch = [Math]::Max($BatchSize, 250)
+        $refreshArgs = @('--refresh-listings', '--batch-size', "$refreshBatch") +
+                       $deadline + $common
+        if ($MaxPages -gt 0) { $refreshArgs += @('--max-pages', "$MaxPages") }
+        Invoke-Worker -Module 'workers.crawl' -Arguments $refreshArgs | Out-Null
 
-    if ($SkipTranscribe) {
-        Write-Log 'Skipping transcription (-SkipTranscribe)'
-    } else {
-        Write-Log 'Step 4/5  transcribe'
-        Invoke-Worker -Module 'workers.transcribe' `
-            -Arguments (@('--batch-size', "$BatchSize") + $deadline + $common) | Out-Null
+        if ($DiscoverFirst) {
+            # Enumerate the rest of the site before transcribing anything.
+            # Costs hours on a first run, but the full work list is then known.
+            $sweep = 0
+            while (-not (Test-OutOfTime $stopTime)) {
+                $work = Get-WorkLeft
+                if ($null -eq $work -or [int]$work.crawl_queued -le 0) { break }
+                $sweep++
+                Write-Log "Discovery pass $sweep : $($work.crawl_queued) URL(s) queued"
+                Invoke-Worker -Module 'workers.crawl' `
+                    -Arguments (@('--batch-size', '250') + $deadline + $common) | Out-Null
+            }
+        }
     }
 
-    Write-Log 'Step 5/5  index'
-    Invoke-Worker -Module 'workers.index_build' -Arguments ($deadline + $common) | Out-Null
+    # The work loop. Each cycle takes one batch all the way through:
+    # crawl -> download -> transcribe -> index. Indexing at the end of every
+    # cycle means a killed run still leaves the completed batches searchable,
+    # rather than losing a night of transcription that was never indexed.
+    Write-Section 'Work loop'
+    $cycle = 0
+    $lastSignature = ''
+    $stalled = 0
 
-    Write-Section 'Run complete'
+    while ($true) {
+        if (Test-OutOfTime $stopTime) {
+            Write-Log "Reached the $Until stop time. Remaining work resumes next run."
+            break
+        }
+        if ($MaxCycles -gt 0 -and $cycle -ge $MaxCycles) {
+            Write-Log "Reached -MaxCycles $MaxCycles."
+            break
+        }
+
+        $work = Get-WorkLeft
+        if ($null -eq $work) {
+            Write-Log 'Stopping: could not determine remaining work.' 'WARN'
+            break
+        }
+        if ([int]$work.total -le 0) {
+            Write-Log 'Everything discovered so far is downloaded, transcribed, and indexed.'
+            break
+        }
+
+        $cycle++
+        Write-Log ''
+        Write-Log "--- cycle $cycle | $(Format-WorkLeft $work) ---"
+
+        # 1. Discovery keeps the queue fed. Crawling a page takes seconds while
+        #    transcribing takes minutes, so this naturally runs ahead.
+        if (-not $Url -and [int]$work.crawl_queued -gt 0) {
+            $crawlArgs = @('--batch-size', "$BatchSize") + $deadline + $common
+            if ($MaxPages -gt 0) { $crawlArgs += @('--max-pages', "$MaxPages") }
+            Invoke-Worker -Module 'workers.crawl' -Arguments $crawlArgs | Out-Null
+        }
+
+        # 2. Fetch this batch's audio.
+        Invoke-Worker -Module 'workers.download_audio' `
+            -Arguments (@('--batch-size', "$BatchSize") + $deadline + $common) | Out-Null
+
+        # 3. Transcribe it.
+        if ($SkipTranscribe) {
+            Write-Log 'Skipping transcription (-SkipTranscribe)'
+        } else {
+            Invoke-Worker -Module 'workers.transcribe' `
+                -Arguments (@('--batch-size', "$BatchSize") + $deadline + $common) | Out-Null
+        }
+
+        # 4. Index what this cycle produced, so the batch is queryable now.
+        Invoke-Worker -Module 'workers.index_build' `
+            -Arguments ($deadline + $common) | Out-Null
+
+        # Stall detection. Permanently failing items would otherwise keep the
+        # loop cycling all night without ever reducing the outstanding work.
+        $after = Get-WorkLeft
+        if ($null -eq $after) { break }
+
+        $signature = Get-WorkSignature $after
+        if ($signature -eq $lastSignature) { $stalled++ } else { $stalled = 0 }
+        $lastSignature = $signature
+
+        if ($stalled -ge 2) {
+            Write-Log 'No progress across two consecutive cycles; stopping.' 'WARN'
+            Write-Log 'Check Status for failed items; they are retried on the next run.' 'WARN'
+            break
+        }
+    }
+
+    Write-Section "Run complete after $cycle cycle(s)"
     Invoke-Status
     return 0
 }
