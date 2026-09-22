@@ -56,7 +56,7 @@ class Sandbox:
         settings["Site"]["TimeoutSeconds"] = 10
         # Only the paths we captured.
         settings["Site"]["SeedPaths"] = ["/messages/archive/", "/messages/",
-                                         "/about/core-beliefs/"]
+                                         "/core-beliefs/", "/about/"]
         settings["Bible"]["SourceUrl"] = ""
         settings["Bible"]["FallbackUrl"] = ""
 

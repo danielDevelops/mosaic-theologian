@@ -18,7 +18,8 @@ from urllib.robotparser import RobotFileParser
 import requests
 
 from lib.pagetext import (
-    canonical_url, dedup_key, extract, is_listing_url, is_message_url,
+    canonical_url, configured_paths, dedup_key, extract, is_listing_url,
+    is_message_url, site_path,
 )
 from lib.state import Job, atomic_write_json, utcnow
 from workers.common import WorkerContext, base_parser, log
@@ -112,27 +113,30 @@ def in_scope(url: str, content_paths: set[str], scope: str) -> bool:
     """
     if scope != "messages":
         return True
-    path = urlparse(url).path.rstrip("/")
+    path = site_path(url)
     if path.startswith("/messages"):
         return True
     return path in content_paths
 
 
-def crawl_priority(url: str, belief_paths: set[str]) -> int:
+def crawl_priority(url: str, belief_paths: set[str],
+                   content_paths: set[str]) -> int:
     """Visit order. Lower runs first.
 
-    Without this the crawl is breadth-first over whatever the home page links
-    to, so it spends its time on /kids/ and /join-the-story/ and never reaches
-    a sermon. The archive and series indexes come first because they are what
-    enumerate the messages; the messages themselves come next.
+    Beliefs and the other named church documents are fetched before sermon
+    detail pages so a short first batch still has Scripture + beliefs to
+    query against. Listings stay first because they enumerate the rest.
     """
     if is_listing_url(url):
         return 0
-    if is_message_url(url):
+    path = site_path(url)
+    if path in belief_paths:
         return 1
-    if urlparse(url).path.rstrip("/") in belief_paths:
+    if path in content_paths:
         return 2
-    return 3
+    if is_message_url(url):
+        return 3
+    return 4
 
 
 def main() -> int:
@@ -157,10 +161,10 @@ def main() -> int:
         base_netloc = urlparse(base).netloc
         user_agent = site["UserAgent"]
         deny = list(site.get("DenyPatterns", []))
-        belief_paths = {p.rstrip("/") for p in site.get("BeliefPaths", [])}
+        belief_paths = configured_paths(site.get("BeliefPaths", []))
         exclude_campuses = {c.lower() for c in site.get("ExcludeCampuses", [])}
         scope = site.get("FollowScope", "messages")
-        content_paths = {p.rstrip("/") for p in site.get("ContentPaths", [])}
+        content_paths = configured_paths(site.get("ContentPaths", []))
         if exclude_campuses:
             log(f"Excluding campus(es): {', '.join(sorted(exclude_campuses))}")
         log(f"Link scope: {scope}")
@@ -249,7 +253,9 @@ def main() -> int:
             if not queued:
                 break
 
-            url = min(queued, key=lambda u: (crawl_priority(u, belief_paths), u))
+            url = min(queued, key=lambda u: (
+                crawl_priority(u, belief_paths, content_paths), u
+            ))
 
             if not same_site(url, base_netloc):
                 catalog.mark(url, "skipped", "offsite")
@@ -304,9 +310,11 @@ def main() -> int:
                 if catalog.add(link, source=url):
                     added += 1
 
-            path_key = urlparse(url).path.rstrip("/")
-            is_belief = path_key in belief_paths
-            is_message = is_message_url(url)
+            # Audio means this is a sermon even if it lives outside
+            # /messages/... (the "We" vision sermon is one of those).
+            # Belief tagging is only for the statement documents.
+            is_message = is_message_url(url) or bool(page.audio_url)
+            is_belief = site_path(url) in belief_paths and not page.audio_url
 
             # Listing pages are scaffolding. The archive, its per-year views,
             # and the series indexes exist to yield links; their body is a list

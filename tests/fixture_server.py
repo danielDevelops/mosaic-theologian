@@ -61,6 +61,9 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         fixture = FIXTURES / slug_for(path)
+        # /core-beliefs and /about/core-beliefs are the same page.
+        if not fixture.is_file() and path.rstrip("/") == "/core-beliefs":
+            fixture = FIXTURES / slug_for("/about/core-beliefs/")
         if not fixture.is_file():
             self._send(404, b"not found", "text/plain")
             return

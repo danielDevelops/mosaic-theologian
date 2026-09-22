@@ -17,24 +17,28 @@
     "SeedPaths": [
       "/messages/archive/",
       "/messages/",
+      "/core-beliefs/",
       "/about/core-beliefs/",
+      "/about/",
+      "/mission-vision-values/",
       "/about/mission-vision-values/",
-      "/about/our-story/",
       "/resources/"
     ],
 
     "FollowScope": "messages",
 
     "ContentPaths": [
+      "/core-beliefs/",
       "/about/core-beliefs/",
+      "/about/",
+      "/mission-vision-values/",
       "/about/mission-vision-values/",
-      "/about/our-story/",
-      "/about/pastors-and-leaders/",
       "/resources/"
     ],
     "BeliefPaths": [
+      "/core-beliefs/",
       "/about/core-beliefs/",
-      "/about/mission-vision-values/"
+      "/about/"
     ],
     "DenyPatterns": [
       "/calendar/",

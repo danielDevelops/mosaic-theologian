@@ -37,6 +37,9 @@ PATHS = [
     "/messages/the-letters-of-john/1-john-1.3-4-2/",
     "/messages/hebrews/hebrews-4.14-16/",
     "/about/core-beliefs/",
+    "/core-beliefs/",
+    "/about/",
+    "/mission-vision-values/",
 ]
 
 

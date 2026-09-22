@@ -137,10 +137,35 @@ def canonical_url(url: str) -> str:
             if k.lower() not in view_only]
 
     path = parsed.path.rstrip("/") or "/"
+    # WordPress serves several pages at both /about/slug and /slug
+    # (core-beliefs, mission-vision-values). Keep /about itself; that is
+    # the story / vision document. Collapse the rest so one page is one
+    # catalog entry and one index row.
+    if path.startswith("/about/"):
+        path = path[len("/about"):] or "/about"
+
     rebuilt = f"{parsed.scheme}://{parsed.netloc.lower()}{path}"
     if kept:
         rebuilt += "?" + urlencode(sorted(kept))
     return rebuilt
+
+
+def site_path(url_or_path: str) -> str:
+    """Canonical path used for scope checks and belief tagging.
+
+    Accepts a full URL or a site path. /about/core-beliefs and
+    /core-beliefs become the same key.
+    """
+    if "://" not in url_or_path:
+        url_or_path = "http://local.invalid" + (
+            url_or_path if url_or_path.startswith("/") else "/" + url_or_path
+        )
+    return urlparse(canonical_url(url_or_path)).path.rstrip("/") or "/"
+
+
+def configured_paths(raw: list[str] | None) -> set[str]:
+    """Normalise a settings path list, including /about/slug aliases."""
+    return {site_path(p) for p in (raw or []) if p}
 
 
 def is_listing_url(url: str) -> bool:
