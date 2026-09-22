@@ -36,8 +36,7 @@ param(
     # Safety stop for the cycle loop. 0 means "until done or out of time".
     [int]    $MaxCycles = 0,
 
-    # Crawl the whole site before transcribing anything, instead of
-    # interleaving discovery with processing.
+    # After on-disk audio is drained, refresh listings before download/crawl.
     [switch] $DiscoverFirst,
 
     # Export only.
@@ -724,10 +723,10 @@ function Write-WorkBoard {
     Write-Log (Format-WorkLeft $Work)
     switch ("$($Work.next_action)") {
         'transcribe'     { Write-Log "Next: transcribe $($Work.need_transcribe) file(s) already on disk. No crawl, no new downloads." }
-        'index'          { Write-Log "Next: index $($Work.need_index) finished transcript(s)." }
         'download'       { Write-Log "Next: download $($Work.need_audio) queued audio file(s). Transcribe queue is empty." }
         'crawl_messages' { Write-Log "Next: fetch $($Work.queued_messages) message page(s)." }
         'discover'       { Write-Log "Next: refresh listing pages for new messages." }
+        'index'          { Write-Log "Next: index $($Work.need_index) finished transcript(s)." }
         'bible'          { Write-Log 'Next: index Scripture.' }
         'idle'           { Write-Log 'Next: nothing left.' }
         default          { }
@@ -753,11 +752,72 @@ function Invoke-TranscribeDrain {
     return $true
 }
 
+function Invoke-IndexBestEffort {
+    <#
+        Index is best-effort. A failure must not block crawl or download;
+        transcripts stay queued and are retried on a later cycle or run.
+    #>
+    param([string[]] $Deadline, [string[]] $Common, [string] $Label = 'index')
+    Write-Section "NOW: $Label"
+    $code = Invoke-Worker -Module 'workers.index_build' `
+        -Arguments ($Deadline + $Common)
+    if ($code -ne 0) {
+        Write-Log 'Indexing failed this pass; continuing with crawl/download. Transcripts stay queued for index.' 'WARN'
+        return $false
+    }
+    return $true
+}
+
+function Invoke-DiscoveryPass {
+    <#
+        Refresh listing pages. Returns $true only when crawl exited cleanly
+        or the queued frontier grew, so a failed seed is not treated as done.
+    #>
+    param(
+        [string[]] $Deadline,
+        [string[]] $Common,
+        [string] $Reason = 'listings only'
+    )
+    $before = Get-WorkLeft
+    $beforeMsg  = if ($before) { [int]$before.queued_messages } else { 0 }
+    $beforeList = if ($before) { [int]$before.queued_listings } else { 0 }
+
+    Write-Section "NOW: discovery ($Reason)"
+    $crawlArgs = @('--refresh-listings', '--listings-only',
+                   '--batch-size', '0') + $Deadline + $Common
+    $code = Invoke-Worker -Module 'workers.crawl' -Arguments $crawlArgs
+
+    $after = Get-WorkLeft
+    Write-WorkBoard $after 'After discovery'
+    if ($null -eq $after) { return $false }
+
+    $grew = ([int]$after.queued_messages -gt $beforeMsg) -or
+            ([int]$after.queued_listings -gt $beforeList)
+    if ($code -eq 0 -or $grew) {
+        return $true
+    }
+    Write-Log 'Discovery did not succeed; will retry on a later cycle.' 'WARN'
+    return $false
+}
+
 function Get-WorkSignature {
+    <#
+        Frontier signature for stall detection. need_index is included so a
+        successful index pass resets the counter, but callers must not count
+        an index-only no-op as a stall while crawl/download work remains.
+    #>
     param($Work)
     return ('{0}|{1}|{2}|{3}|{4}' -f
         $Work.queued_listings, $Work.queued_messages,
         $Work.need_audio, $Work.need_transcribe, $Work.need_index)
+}
+
+function Test-FrontierRemaining {
+    param($Work, [bool] $DidDiscover)
+    if ($null -eq $Work) { return $false }
+    return ([int]$Work.need_audio -gt 0) -or
+           ([int]$Work.queued_messages -gt 0) -or
+           (-not $DidDiscover)
 }
 
 # ------------------------------------------------------------------- lock --
@@ -843,11 +903,17 @@ function Invoke-Run {
     # before any crawl or any new download. That is what makes a restart
     # pick up the ~30 files sitting in data\audio instead of walking the
     # archive again for twenty minutes.
+    #
+    # Priority after the on-disk drain:
+    #   download -> crawl -> discover -> index
+    # Index is last and best-effort so a sticky index failure cannot starve
+    # crawl/download for the rest of the night.
     # ------------------------------------------------------------------
     $didDiscover = $false
     $cycle = 0
     $lastSignature = ''
     $stalled = 0
+    $lastAction = ''
 
     while ($true) {
         if (Test-OutOfTime $stopTime) {
@@ -870,69 +936,93 @@ function Invoke-Run {
         $needDl    = [int]$work.need_audio
         $needCrawl = [int]$work.queued_messages
         $needList  = [int]$work.queued_listings
+        # Under -SkipTranscribe, on-disk audio is intentionally left alone
+        # and must not keep the idle check from finishing other work.
+        $txBlocksIdle = (-not $SkipTranscribe -and $needTx -gt 0)
 
-        if ($needTx -le 0 -and $needIdx -le 0 -and $needDl -le 0 -and
+        if (-not $txBlocksIdle -and $needIdx -le 0 -and $needDl -le 0 -and
             $needCrawl -le 0 -and ($didDiscover -or $needList -le 0) -and
             [int]$work.bible_pending -le 0 -and -not $Url) {
             if (-not $didDiscover -and -not $Url) {
                 # No backlog. Look for newly published messages once.
-                Write-Section 'NOW: discovery (listings only; backlog was empty)'
-                $crawlArgs = @('--refresh-listings', '--listings-only',
-                               '--batch-size', '0') + $deadline + $common
-                Invoke-Worker -Module 'workers.crawl' -Arguments $crawlArgs | Out-Null
-                $didDiscover = $true
-                $work = Get-WorkLeft
-                Write-WorkBoard $work 'After discovery'
+                if (Invoke-DiscoveryPass -Deadline $deadline -Common $common `
+                        -Reason 'listings only; backlog was empty') {
+                    $didDiscover = $true
+                    $stalled = 0
+                } else {
+                    $stalled++
+                    if ($stalled -ge 2) {
+                        Write-Log 'Discovery failed twice with an empty backlog; stopping.' 'WARN'
+                        break
+                    }
+                }
                 continue
             }
-            Write-Log 'Everything discovered is downloaded, transcribed, and indexed.'
+            if ($SkipTranscribe -and $needTx -gt 0) {
+                Write-Log 'Non-GPU work is done. Audio remains on disk (-SkipTranscribe).'
+            } else {
+                Write-Log 'Everything discovered is downloaded, transcribed, and indexed.'
+            }
             break
         }
 
         $cycle++
         Write-Log ''
         Write-Log "--- cycle $cycle | $(Format-WorkLeft $work) ---"
+        $lastAction = ''
 
         # 1. Transcribe everything already on disk. Do not crawl or download.
         if (-not $SkipTranscribe -and $needTx -gt 0) {
             if (-not (Invoke-TranscribeDrain -Deadline $deadline -Common $common)) {
                 break
             }
-            Invoke-Worker -Module 'workers.index_build' `
-                -Arguments ($deadline + $common) | Out-Null
+            Invoke-IndexBestEffort -Deadline $deadline -Common $common `
+                -Label 'index after transcription' | Out-Null
             Write-WorkBoard (Get-WorkLeft) 'After transcription'
+            $lastAction = 'transcribe'
         }
-        elseif ($SkipTranscribe -and $needTx -gt 0) {
-            Write-Log 'Skipping transcription (-SkipTranscribe). Audio stays on disk.'
+        # 2. Optional: refresh listings before processing new pages.
+        elseif ($DiscoverFirst -and -not $didDiscover -and -not $Url) {
+            if (Invoke-DiscoveryPass -Deadline $deadline -Common $common `
+                    -Reason 'listings only; -DiscoverFirst after on-disk drain') {
+                $didDiscover = $true
+            }
+            $lastAction = 'discover'
         }
-        elseif ($needIdx -gt 0) {
-            Write-Section "NOW: index $($needIdx) item(s)"
-            Invoke-Worker -Module 'workers.index_build' `
-                -Arguments ($deadline + $common) | Out-Null
-        }
+        # 3. Download queued audio once the on-disk transcribe queue is clear.
         elseif ($needDl -gt 0) {
             Write-Section "NOW: download $($needDl) queued audio file(s)"
             Write-Log 'Transcribe queue is empty, so downloads may proceed.'
             Invoke-Worker -Module 'workers.download_audio' `
                 -Arguments (@('--batch-size', "$BatchSize") + $deadline + $common) | Out-Null
+            $lastAction = 'download'
         }
+        # 4. Fetch message pages that still need crawling.
         elseif ($needCrawl -gt 0 -and -not $Url) {
             Write-Section "NOW: fetch $needCrawl message page(s)"
             $batchCrawl = @('--messages-only', '--batch-size', "$BatchSize") +
                           $deadline + $common
             if ($MaxPages -gt 0) { $batchCrawl += @('--max-pages', "$MaxPages") }
             Invoke-Worker -Module 'workers.crawl' -Arguments $batchCrawl | Out-Null
+            $lastAction = 'crawl'
         }
+        # 5. Discover listings when the processing frontier is empty.
         elseif (-not $didDiscover -and -not $Url) {
-            Write-Section 'NOW: discovery (listings only)'
-            $crawlArgs = @('--refresh-listings', '--listings-only',
-                           '--batch-size', '0') + $deadline + $common
-            if ($DiscoverFirst) {
-                Write-Log '-DiscoverFirst: enumerate listings before processing new pages.'
+            if (Invoke-DiscoveryPass -Deadline $deadline -Common $common `
+                    -Reason 'listings only') {
+                $didDiscover = $true
             }
-            Invoke-Worker -Module 'workers.crawl' -Arguments $crawlArgs | Out-Null
-            $didDiscover = $true
-            Write-WorkBoard (Get-WorkLeft) 'After discovery'
+            $lastAction = 'discover'
+        }
+        # 6. Index last — never blocks crawl/download/discover.
+        elseif ($needIdx -gt 0) {
+            Invoke-IndexBestEffort -Deadline $deadline -Common $common `
+                -Label "index $($needIdx) item(s)" | Out-Null
+            $lastAction = 'index'
+        }
+        elseif ($SkipTranscribe -and $needTx -gt 0) {
+            Write-Log 'Skipping transcription (-SkipTranscribe). Audio stays on disk; nothing else queued.'
+            break
         }
         else {
             Write-Log 'No matching action for the current queue; stopping.' 'WARN'
@@ -942,7 +1032,16 @@ function Invoke-Run {
         $after = Get-WorkLeft
         if ($null -eq $after) { break }
         $signature = Get-WorkSignature $after
-        if ($signature -eq $lastSignature) { $stalled++ } else { $stalled = 0 }
+        if ($signature -eq $lastSignature) {
+            # Sticky index must not end the night while crawl/download remain.
+            if ($lastAction -eq 'index' -and (Test-FrontierRemaining $after $didDiscover)) {
+                Write-Log 'Index made no progress; continuing with remaining crawl/download work.' 'WARN'
+            } else {
+                $stalled++
+            }
+        } else {
+            $stalled = 0
+        }
         $lastSignature = $signature
         if ($stalled -ge 2) {
             Write-Log 'No progress across two consecutive cycles; stopping.' 'WARN'

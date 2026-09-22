@@ -124,13 +124,15 @@ def main() -> int:
         # never reduce the count.
         "audio_on_disk": len(audio_stems),
         "transcripts_on_disk": transcripts_on_disk,
-        # Drain existing work before crawling or downloading more.
+        # Drain on-disk audio before crawling or downloading more. Index is
+        # reported after the frontier so a sticky index backlog is not mistaken
+        # for the next action while download/crawl remain.
         "next_action": (
             "transcribe" if need_transcribe else
-            "index" if need_index else
             "download" if need_audio else
             "crawl_messages" if queued_messages else
             "discover" if queued_listings else
+            "index" if need_index else
             "bible" if bible_pending else
             "idle"
         ),

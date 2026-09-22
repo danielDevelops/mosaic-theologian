@@ -55,22 +55,32 @@ A run does existing work first, and only crawls when those queues are empty.
 `data\audio` that never got attached to a job.
 
 **2. Drain what is already here.** If audio is waiting, transcribe all of it
-(and index) before any crawl or any new download. You will see `NOW:
-transcribe N file(s)` and a `START` / `DONE` line for each sermon. Transcripts
-stay in `data\transcripts`. Audio is deleted after each success.
+before any crawl or any new download. You will see `NOW: transcribe N
+file(s)` and a `START` / `DONE` line for each sermon. Transcripts stay in
+`data\transcripts`. Audio is deleted after each success. Indexing runs
+best-effort after the drain; a failed index does **not** stop crawl or
+download.
 
-**3. Then download, then crawl.** New MP3s are fetched only when the
-transcribe queue is empty. New message pages are fetched only when there is
-nothing left to download or transcribe. Listing-page discovery runs last, so
-a restart does not walk the archive again while 30 files sit untouched.
+**3. Then download, then crawl, then discover.** New MP3s are fetched only
+when the transcribe queue is empty. New message pages are fetched only when
+there is nothing left to download or transcribe. Listing-page discovery runs
+after that, so a restart does not walk the archive again while 30 files sit
+untouched. Indexing is last and never blocks the frontier.
+
+`-Until` is optional. Without it (and without `-MaxMinutes`), the job keeps
+cycling until work is idle or two consecutive cycles make no progress. With
+`-Until 06:00`, it stops at that wall-clock time and leaves remaining work
+for the next run.
 
 CUDA is pinned in `.env` (`CUDA_VERSION` / `CUDA_PATH`). Other CUDA bins are
 stripped from PATH for this process so cublas/cudnn are not loaded from two
 places. If the GPU cannot load, the run stops instead of crawling for an hour.
 
-The loop stops when there is nothing left to do, when `-Until` is reached, or
-when two consecutive cycles make no progress at all. That last one is a guard
-against permanently failing items keeping the job spinning all night.
+The loop stops when there is nothing left to do, when `-Until` / `-MaxMinutes`
+is reached, or when two consecutive cycles make no progress at all. That last
+one is a guard against permanently failing items keeping the job spinning all
+night. A sticky index failure alone does not trip that guard while download
+or crawl work remains.
 
 Useful flags:
 
@@ -78,13 +88,14 @@ Useful flags:
 |---|---|
 | `-BatchSize 20` | Items per stage per cycle. Not a cap on the whole run. |
 | `-MaxCycles 5` | Stop after N cycles. Handy for a short test run. |
-| `-DiscoverFirst` | Crawl the entire site before transcribing anything. |
-| `-SkipTranscribe` | Crawl and index page text only; leave the GPU alone. |
+| `-Until 06:00` | Optional wall-clock stop. Omit to run until idle/stall. |
+| `-DiscoverFirst` | After on-disk audio is drained, refresh listings before download/crawl. |
+| `-SkipTranscribe` | Crawl and index page text only; leave the GPU alone. On-disk audio stays put and does not block crawl/download. |
 | `-MaxPages 15` | Cap how many message pages discovery picks up. |
 
 Existing audio is always transcribed before discovery, including with
-`-DiscoverFirst`. That flag only changes what happens after the backlog is
-clear.
+`-DiscoverFirst`. That flag only changes what happens after the on-disk
+backlog is clear: listings are refreshed before new downloads.
 
 Scheduled task:
 
