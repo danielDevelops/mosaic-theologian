@@ -640,13 +640,19 @@ function Invoke-Worker {
     # A successful transcribe batch (exit 0, with progress lines) looks like
     # failure, and the night stops. Out-Host keeps the lines on screen and
     # leaves the return value as the integer exit code.
+    #
+    # python -m looks up workers from the process working directory. A
+    # scheduled task or a wrapper started from another folder would otherwise
+    # report "No module named workers".
     $previous = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
+    Push-Location $Root
     try {
         & $VenvPython @argv | Out-Host
         $code = $LASTEXITCODE
     }
     finally {
+        Pop-Location
         $ErrorActionPreference = $previous
     }
 
