@@ -629,19 +629,27 @@ function Invoke-Worker {
     $argv = @('-X', 'utf8', '-m', $Module) + $Arguments
     Write-Verbose ("python " + ($argv -join ' '))
 
-    # Workers stream progress for hours, so they run inline rather than being
-    # captured. 'Continue' is what stops an ordinary library warning on stderr
-    # from aborting the whole night job.
+    # Workers stream progress for hours. 'Continue' stops an ordinary library
+    # warning on stderr from aborting the whole night job.
+    #
+    # Stdout has to be shown with Out-Host, not left as function output.
+    # Callers do `$code = Invoke-Worker`. In PowerShell that assignment
+    # collects every printed line plus the exit code into one array, and
+    # `$code -ne 0` then filters the array instead of testing the exit code.
+    # A successful transcribe batch (exit 0, with progress lines) looks like
+    # failure, and the night stops. Out-Host keeps the lines on screen and
+    # leaves the return value as the integer exit code.
     $previous = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try {
-        & $VenvPython @argv
+        & $VenvPython @argv | Out-Host
         $code = $LASTEXITCODE
     }
     finally {
         $ErrorActionPreference = $previous
     }
 
+    if ($null -eq $code) { $code = 0 }
     if ($code -ne 0) {
         Write-Log "$Module exited with code $code" 'WARN'
     }
@@ -745,8 +753,8 @@ function Invoke-TranscribeDrain {
     $code = Invoke-Worker -Module 'workers.transcribe' `
         -Arguments (@('--batch-size', '0') + $Deadline + $Common)
     if ($code -ne 0) {
-        Write-Log 'Transcription failed. Not crawling or downloading more until this is fixed.' 'ERROR'
-        Write-Log 'Pin CUDA in .env (CUDA_VERSION / CUDA_PATH) and re-run.' 'ERROR'
+        Write-Log "Transcription exited with code $code. Crawl and download stay paused until the next run." 'ERROR'
+        Write-Log 'The worker lines above are the actual failure.' 'ERROR'
         return $false
     }
     return $true
