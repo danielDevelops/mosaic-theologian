@@ -17,9 +17,10 @@ chmod +x mosaic.sh
 ./mosaic.sh ask
 ```
 
-`install` needs Homebrew. It adds `python3` and `llama.cpp` if they are
-missing, creates a `.venv` with CPU-only wheels, and records what it installed
-in `state/deps.json`. It is safe to re-run.
+`install` needs Homebrew. It adds Python 3.12 and `llama.cpp` if they are
+missing, creates a `.venv` with that Python, and records what it installed
+in `state/deps.json`. It is safe to re-run. An existing `.venv` built with
+another Python is replaced: Intel PyTorch wheels stop at 3.12.
 
 If the shell refuses to run the script with a `bad interpreter` error, the copy
 converted the line endings. Fix with:
@@ -141,3 +142,9 @@ large model on this hardware can legitimately take a while to load.
 If `verify` reports an embedding mismatch, do not use `--no-verify` to get
 past it. Re-export from Windows with `-Full` so the bundled model and the
 index match again.
+
+If a question fails with `Index read failed`, the index was written by a
+different LanceDB than the one pinned in `requirements-mac.txt`. On Windows,
+install the pinned requirements, run `-Action Reindex`, then export with
+`-Full` and copy the bundle again. Do not keep asking: a failed read is an
+error, and it is not a finding that the church has no position.

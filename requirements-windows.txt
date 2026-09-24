@@ -5,6 +5,11 @@
 # numpy is installed by EnsureDeps *before* torch. It is pinned here too so a
 # manual "pip install -r" cannot leave torch importable but NumPy-less, which
 # only shows up as a warning on stderr and is easy to miss.
+#
+# lancedb, sentence-transformers, and transformers are pinned to the last
+# versions the Intel Mac can run. A newer LanceDB has no Intel macOS wheel,
+# so an index written here would be unreadable there. Changing these three
+# requires a reindex and a full export.
 
 numpy>=1.26
 requests>=2.31
@@ -13,8 +18,9 @@ lxml>=5.0
 faster-whisper>=1.0.3
 nvidia-cublas-cu12
 nvidia-cudnn-cu12
-sentence-transformers>=3.0
-lancedb>=0.13
+sentence-transformers==5.7.0
+transformers==4.57.6
+lancedb==0.25.3
 pyarrow>=16.0
 pandas>=2.2
 fastapi>=0.115

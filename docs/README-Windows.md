@@ -178,8 +178,20 @@ swapping the chat model is cheap, but swapping the **embedding** model
 invalidates every vector in the index and means a full rebuild here
 (`-Action Run -Force`) before exporting again.
 
-A schema or metadata change, with the same embedding model, does not need
-that. Rebuild from the Bible file and transcripts already on disk:
+`lancedb`, `sentence-transformers`, and `transformers` are pinned in
+`requirements-windows.txt` to the last versions the Intel Mac can run.
+LanceDB 0.26 and later have no Intel macOS wheel, so an index written by a
+newer release cannot be read there. After changing those pins:
+
+```powershell
+.\Mosaic-NightJob.ps1 -Action EnsureDeps
+.\Mosaic-NightJob.ps1 -Action Reindex
+.\Mosaic-NightJob.ps1 -Action Export -Destination E:\mosaic-portable -Full
+```
+
+A schema or metadata change, with the same embedding model and the same
+pins, does not need a crawl. Rebuild from the Bible file and transcripts
+already on disk:
 
 ```powershell
 .\Mosaic-NightJob.ps1 -Action Reindex

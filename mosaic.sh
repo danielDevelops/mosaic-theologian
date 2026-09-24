@@ -39,6 +39,29 @@ die()  { printf 'ERROR %s\n' "$*" >&2; exit 1; }
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
+# Intel PyTorch wheels stop at Python 3.12. Homebrew's python@3.12 is
+# keg-only, so it is not the python3 already on PATH.
+resolve_python312() {
+  if have python3.12; then
+    command -v python3.12
+    return 0
+  fi
+  local prefix
+  prefix="$(brew --prefix python@3.12 2>/dev/null || true)"
+  if [ -n "$prefix" ] && [ -x "$prefix/bin/python3.12" ]; then
+    printf '%s' "$prefix/bin/python3.12"
+    return 0
+  fi
+  return 1
+}
+
+venv_is_python312() {
+  [ -x "$PY" ] || return 1
+  local ver
+  ver="$("$PY" -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null || true)"
+  [ "$ver" = "3.12" ]
+}
+
 # Append a dependency record. Mirrors the Windows deps.json so both machines
 # leave the same kind of audit trail. Nothing is ever uninstalled.
 record_dep() {
@@ -116,13 +139,15 @@ cmd_install() {
     die "Homebrew is required. Install it from https://brew.sh then re-run."
   fi
 
-  if have python3; then
-    say "python3 present: $(python3 --version)"
-    record_dep python3 present "$(python3 --version)"
+  local py312
+  if py312="$(resolve_python312)"; then
+    say "Python 3.12 present: $("$py312" --version)"
+    record_dep python3.12 present "$("$py312" --version)"
   else
-    say "Installing python3"
-    brew install python@3.12
-    record_dep python3 installed "brew python@3.12"
+    say "Installing python@3.12"
+    NONINTERACTIVE=1 brew install python@3.12
+    py312="$(resolve_python312)" || die "python@3.12 installed but the interpreter was not found."
+    record_dep python3.12 installed "brew python@3.12"
   fi
 
   if have llama-server; then
@@ -130,16 +155,21 @@ cmd_install() {
     record_dep llama.cpp present "$(command -v llama-server)"
   else
     say "Installing llama.cpp"
-    brew install llama.cpp
+    NONINTERACTIVE=1 brew install llama.cpp
     record_dep llama.cpp installed "brew llama.cpp"
   fi
 
-  if [ ! -x "$PY" ]; then
-    say "Creating virtual environment"
-    python3 -m venv "$VENV"
-    record_dep venv installed ".venv"
+  if venv_is_python312; then
+    say "Virtual environment present (Python 3.12)."
   else
-    say "Virtual environment present."
+    if [ -d "$VENV" ]; then
+      say "Replacing virtual environment (need Python 3.12)"
+      rm -rf "$VENV"
+    else
+      say "Creating virtual environment"
+    fi
+    "$py312" -m venv "$VENV"
+    record_dep venv installed ".venv python3.12"
   fi
 
   say "Installing Python requirements (CPU wheels)"

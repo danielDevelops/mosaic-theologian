@@ -17,6 +17,15 @@ from .embedding import EmbeddingIdentity
 COLLECTIONS = ("scripture", "beliefs", "mosaic")
 MANIFEST_NAME = "index-manifest.json"
 
+_INDEX_READ_FAILED = (
+    "Index read failed for {collection}. LanceDB on this machine does not "
+    "match the one that built the index."
+)
+
+
+class IndexReadError(RuntimeError):
+    """The index could not be read. An empty result means something else."""
+
 
 def schema_for(dimension: int):
     import pyarrow as pa
@@ -136,8 +145,8 @@ class VectorStore:
             return []
         try:
             results = table.search(list(vector)).limit(limit).to_list()
-        except Exception:
-            return []
+        except Exception as exc:
+            raise IndexReadError(_INDEX_READ_FAILED.format(collection=collection)) from exc
 
         for row in results:
             row.pop("vector", None)
@@ -162,8 +171,10 @@ class VectorStore:
         except Exception:
             try:
                 rows = table.search().where(where).limit(limit).to_list()
-            except Exception:
-                return []
+            except Exception as exc:
+                raise IndexReadError(
+                    _INDEX_READ_FAILED.format(collection=collection)
+                ) from exc
         if len(rows) > limit:
             rows = rows[:limit]
         for row in rows:

@@ -229,6 +229,7 @@ problem, `2` embedding mismatch. Do not bypass a mismatch.
 | `tests/test_pipeline.py` | Discovery, rerun, batching, dedup, single URL, resume, orphan audio, excluded campus. Uses `tests/fixture_server.py` and `MOSAIC_ROOT` |
 | `tests/test_cross_links.py` | Ref pack/unpack, primary stamp, sustained filter, boosts, cross-link hops, prompt labels, side-index replace |
 | `tests/test_chat_model.py` | GGUF download size checks |
+| `tests/test_embedding_snapshot.py` | 6.1 Normalize path loads on 5.7 without editing the bundled file |
 
 `tests/fixtures/` is a local capture cache (`tests/capture_fixtures.py`), not
 source.
