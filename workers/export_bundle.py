@@ -19,6 +19,7 @@ import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 
+from lib.chat_model import ensure_chat_model
 from lib.config import Paths, load_settings
 from lib.embedding import EmbeddingModel
 from lib.store import VectorStore
@@ -76,6 +77,14 @@ def main() -> int:
     index_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     embedding_identity = index_manifest.get("embedding", {})
 
+    if include_models:
+        try:
+            ensure_chat_model(settings, paths.root)
+        except Exception as exc:
+            log(f"ERROR: {exc}")
+            log("ERROR: Export stopped. The bundle was not copied.")
+            return 1
+
     destination.mkdir(parents=True, exist_ok=True)
     log(f"Destination: {destination}")
 
@@ -124,13 +133,10 @@ def main() -> int:
                 "may get a different revision.")
 
         chat_model = paths.root / settings["Chat"]["ModelFile"]
-        if chat_model.is_file():
-            target = destination / "models" / chat_model.name
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(chat_model, target)
-            written.append(target)
-        else:
-            log("    WARNING: chat GGUF not found; copy one to the Mac manually.")
+        target = destination / "models" / chat_model.name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(chat_model, target)
+        written.append(target)
     else:
         log("  models/ skipped (index-only). Models do not change when "
             "sermons are added.")

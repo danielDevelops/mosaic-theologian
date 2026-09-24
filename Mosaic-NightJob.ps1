@@ -1117,6 +1117,7 @@ function Invoke-Export {
     if ($Full) {
         $args += '--full'
         Write-Log 'Full export: index, content, and models'
+        Write-Log 'If models\chat.gguf is missing, it is downloaded before the bundle is copied.'
     } else {
         $args += '--index-only'
         Write-Log 'Incremental export: index and content only (models unchanged)'

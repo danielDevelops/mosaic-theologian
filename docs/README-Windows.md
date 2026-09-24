@@ -27,9 +27,10 @@ Two lines of the output are worth reading:
 - `Bible JSON validated: 66 books` - a smaller number means the download was
   partial and the file is rejected rather than indexed.
 
-Then drop a chat model GGUF at `models\chat.gguf`. Llama 3.1 8B Instruct
-Q5_K_M is a good default because the same file also runs on the Mac. The
-crawl, transcribe, and index stages all work without it; only chat needs it.
+The chat model is a Llama 3.1 8B Instruct Q5_K_M GGUF at `models\chat.gguf`.
+The crawl, transcribe, and index stages run without it. A full export
+downloads that file when it is missing, then copies it into the bundle.
+If you already have a GGUF there, the export keeps it.
 
 ## A useful first slice
 
@@ -157,6 +158,9 @@ First handoff, including the models:
 ```powershell
 .\Mosaic-NightJob.ps1 -Action Export -Destination E:\mosaic-portable -Full
 ```
+
+`-Full` downloads `models\chat.gguf` first when that file is not already on
+disk (about 6 GB), then copies the index and both models.
 
 Later re-syncs, after new sermons are indexed:
 
