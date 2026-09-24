@@ -11,8 +11,6 @@ import json
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
-import pyarrow as pa
-
 from .chunking import Chunk
 from .embedding import EmbeddingIdentity
 
@@ -20,7 +18,9 @@ COLLECTIONS = ("scripture", "beliefs", "mosaic")
 MANIFEST_NAME = "index-manifest.json"
 
 
-def schema_for(dimension: int) -> pa.Schema:
+def schema_for(dimension: int):
+    import pyarrow as pa
+
     return pa.schema([
         pa.field("id", pa.string()),
         pa.field("collection", pa.string()),
@@ -37,6 +37,7 @@ def schema_for(dimension: int) -> pa.Schema:
         pa.field("verse_start", pa.int32()),
         pa.field("verse_end", pa.int32()),
         pa.field("scripture_refs", pa.string()),
+        pa.field("primary_refs", pa.string()),
         pa.field("source_id", pa.string()),
         pa.field("vector", pa.list_(pa.float32(), dimension)),
     ])
@@ -61,6 +62,36 @@ class VectorStore:
             collection, schema=schema_for(self.dimension), mode="create"
         )
 
+    @staticmethod
+    def _ensure_primary_refs(table) -> None:
+        """Add the column on an index built before sermon primary refs existed.
+
+        A full Reindex rewrites the tables. This keeps the nightly index of
+        one new sermon from failing on the old schema in the meantime.
+        """
+        try:
+            names = set(table.schema.names)
+        except Exception:
+            return
+        if "primary_refs" in names:
+            return
+        try:
+            table.add_columns({"primary_refs": "''"})
+        except Exception:
+            return
+
+    def close(self) -> None:
+        """Drop the connection so the index directory can be renamed."""
+        db = getattr(self, "_db", None)
+        self._db = None
+        if db is None:
+            return
+        closer = getattr(db, "close", None)
+        if callable(closer):
+            closer()
+        import gc
+        gc.collect()
+
     def add(self, collection: str, chunks: Sequence[Chunk],
             vectors: Sequence[Sequence[float]]) -> int:
         if not chunks:
@@ -75,6 +106,7 @@ class VectorStore:
             rows.append(row)
 
         table = self._table(collection)
+        self._ensure_primary_refs(table)
         table.add(rows)
         return len(rows)
 
@@ -115,6 +147,28 @@ class VectorStore:
             row["score"] = max(0.0, 1.0 - distance / 2.0)
             row["collection"] = collection
         return results
+
+    def filter_rows(self, collection: str, where: str,
+                    columns: list[str] | None = None,
+                    limit: int = 500) -> list[dict[str, Any]]:
+        """Metadata lookup. Used to count a sermon's refs and to fetch a passage."""
+        table = self._table(collection, create=False)
+        if table is None:
+            return []
+        rows: list[dict[str, Any]] = []
+        try:
+            scanner = table.to_lance().scanner(filter=where, columns=columns)
+            rows = scanner.to_table().to_pylist()
+        except Exception:
+            try:
+                rows = table.search().where(where).limit(limit).to_list()
+            except Exception:
+                return []
+        if len(rows) > limit:
+            rows = rows[:limit]
+        for row in rows:
+            row.pop("vector", None)
+        return rows
 
     def count(self, collection: str) -> int:
         table = self._table(collection, create=False)

@@ -40,6 +40,7 @@ class WorkerContext:
             max_minutes=getattr(args, "max_minutes", None),
         )
         self.force: bool = bool(getattr(args, "force", False))
+        self.rebuild: bool = bool(getattr(args, "rebuild", False))
         self.batch_size: int = int(getattr(args, "batch_size", 0) or 0)
         self._lock = RunLock(self.paths.state / "night.lock")
 

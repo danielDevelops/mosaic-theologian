@@ -178,6 +178,20 @@ swapping the chat model is cheap, but swapping the **embedding** model
 invalidates every vector in the index and means a full rebuild here
 (`-Action Run -Force`) before exporting again.
 
+A schema or metadata change, with the same embedding model, does not need
+that. Rebuild from the Bible file and transcripts already on disk:
+
+```powershell
+.\Mosaic-NightJob.ps1 -Action Reindex
+.\Mosaic-NightJob.ps1 -Action Reindex -Until 06:00
+```
+
+`Reindex` does not crawl, download, or transcribe. It writes a side index and
+replaces the live one only when scripture and every transcript finish. If you
+pass `-Until` or `-MaxMinutes`, or the job is killed, the current index stays
+in place and the next `Reindex` starts over. Export again afterward so the Mac
+bundle picks up the new index.
+
 ## Adding one URL
 
 If a page was missed:

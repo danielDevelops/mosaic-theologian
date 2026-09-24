@@ -42,11 +42,13 @@ class Chunk:
     verse_start: int = 0
     verse_end: int = 0
     scripture_refs: list[str] = field(default_factory=list)
+    primary_refs: list[str] = field(default_factory=list)
     source_id: str = ""
 
     def to_row(self) -> dict[str, Any]:
         row = asdict(self)
-        row["scripture_refs"] = " ".join(self.scripture_refs)
+        row["scripture_refs"] = bookmap.pack_refs(self.scripture_refs)
+        row["primary_refs"] = bookmap.pack_refs(self.primary_refs)
         return row
 
 
@@ -67,6 +69,7 @@ def chunk_sermon(
     campus: str = "",
     target_tokens: int = 1000,
     overlap_tokens: int = 150,
+    primary_refs: list[str] | None = None,
 ) -> list[Chunk]:
     """Sentence-aligned windows of roughly `target_tokens` with overlap.
 
@@ -126,7 +129,59 @@ def chunk_sermon(
         window_tokens += sentence_tokens
 
     flush()
+    chosen = list(dict.fromkeys(primary_refs)) if primary_refs else primary_from_opening(chunks)
+    for chunk in chunks:
+        chunk.primary_refs = list(chosen)
     return chunks
+
+
+def sermon_primary_refs(title: str = "", page_refs: list[str] | None = None,
+                        page_title: str = "", job_refs: list[str] | None = None) -> list[str]:
+    """The passage a message is about, taken from the page rather than asides.
+
+    Title and page text win. The transcript opening is only a fallback, applied
+    later when this list is empty.
+    """
+    found: list[str] = []
+
+    def add(refs: list[str] | None) -> None:
+        for ref in refs or []:
+            if ref and ref not in found:
+                found.append(ref)
+
+    add(bookmap.extract_refs(title))
+    add(page_refs)
+    add(bookmap.extract_refs(page_title))
+    add(job_refs)
+    return found
+
+
+def primary_from_opening(chunks: list[Chunk]) -> list[str]:
+    """Refs that dominate the start of a transcript.
+
+    A reference named in both of the first two windows is the sermon text.
+    Otherwise the first reference in the opening is the one the speaker announced.
+    """
+    counts: dict[str, int] = {}
+    order: list[str] = []
+    for chunk in chunks[:2]:
+        for ref in chunk.scripture_refs:
+            if ref not in counts:
+                order.append(ref)
+                counts[ref] = 0
+            counts[ref] += 1
+    if not order:
+        return []
+    repeated = [ref for ref in order if counts[ref] >= 2]
+    if repeated:
+        return repeated
+    return [order[0]]
+
+
+def stamp_primary_refs(chunks: list[Chunk], primary_refs: list[str]) -> None:
+    chosen = list(dict.fromkeys(ref for ref in primary_refs if ref))
+    for chunk in chunks:
+        chunk.primary_refs = list(chosen)
 
 
 def _sermon_citation(title: str, speaker: str, date: str) -> str:

@@ -119,7 +119,10 @@
     },
     "CandidateMultiplier": 4,
     "MaxContextChars": 14000,
-    "ScriptureRefBoost": 0.15
+    "PrimaryRefBoost": 0.25,
+    "MentionedRefBoost": 0.1,
+    "CrossLinkMinChunks": 2,
+    "CrossLinkMaxPassages": 2
   },
 
   "Web": {

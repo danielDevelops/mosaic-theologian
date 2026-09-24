@@ -35,6 +35,9 @@ material under a clearly labelled heading so the reader can tell it apart from \
 what the church teaches.
 - When the sources genuinely conflict or a question is historically contested, \
 present the positions fairly instead of flattening them into one answer.
+- A passage marked "Connected in" a sermon is a link that sermon drew. Attribute \
+the link to the sermon. Do not treat it as one biblical text citing the other, \
+and do not treat it as what the sermon's main passage itself says.
 - Be direct and pastoral. Do not pad. If you do not know, say so.
 
 Structure longer answers as:
@@ -55,14 +58,24 @@ def _render_block(title: str, passages, note: str = "") -> str:
         lines.append(f"_{note}_")
     for passage in passages:
         lines.append(f"\n[{passage.label}]")
+        if getattr(passage, "connection", ""):
+            lines.append(passage.connection)
         lines.append(passage.text.strip())
     return "\n".join(lines) + "\n"
 
 
 def build_user_message(result: RetrievalResult) -> str:
-    scripture = result.by_collection("scripture")
+    scripture = [p for p in result.by_collection("scripture") if not p.connection]
     beliefs = result.by_collection("beliefs")
     mosaic = result.by_collection("mosaic")
+    linked = [p for p in result.passages if p.connection]
+
+    teaching_note = "Each label is title | speaker | date."
+    if linked:
+        teaching_note += (
+            " A line that begins Connected in names the sermon that drew that "
+            "link. It is not a claim that one biblical text cites the other."
+        )
 
     parts = [
         "Answer the question using the sources below.",
@@ -70,8 +83,8 @@ def build_user_message(result: RetrievalResult) -> str:
         _render_block("SCRIPTURE", scripture),
         _render_block("CHURCH BELIEFS", beliefs),
         _render_block(
-            "CHURCH TEACHING (sermons and articles)", mosaic,
-            note="Each label is title | speaker | date.",
+            "CHURCH TEACHING (sermons and articles)", mosaic + linked,
+            note=teaching_note,
         ),
     ]
 
@@ -99,6 +112,8 @@ def format_citations(result: RetrievalResult) -> list[str]:
     seen: list[str] = []
     for passage in result.passages:
         label = passage.label
+        if passage.connection:
+            label = f"{label} ({passage.connection})"
         if passage.url and passage.collection != "scripture":
             label = f"{label} — {passage.url}"
         if label not in seen:

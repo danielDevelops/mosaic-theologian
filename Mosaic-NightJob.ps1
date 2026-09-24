@@ -17,12 +17,13 @@
     .\Mosaic-NightJob.ps1 -Action EnsureDeps
     .\Mosaic-NightJob.ps1 -Action Run -Until 06:00
     .\Mosaic-NightJob.ps1 -Action Status
+    .\Mosaic-NightJob.ps1 -Action Reindex
     .\Mosaic-NightJob.ps1 -Action Export -Destination E:\mosaic-portable -Full
 #>
 
 [CmdletBinding()]
 param(
-    [ValidateSet('EnsureDeps', 'Run', 'Status', 'Stop', 'Export')]
+    [ValidateSet('EnsureDeps', 'Run', 'Status', 'Stop', 'Export', 'Reindex')]
     [string] $Action = 'Run',
 
     # Wall-clock stop, checked between items so work halts on a boundary.
@@ -1106,6 +1107,34 @@ function Invoke-Stop {
     return 0
 }
 
+function Invoke-Reindex {
+    <#
+        Rebuild the LanceDB index from the Bible file and transcripts already
+        on disk. Does not crawl, download, or transcribe. The live index is
+        replaced only when the rebuild finishes.
+    #>
+    if (Test-LockHeld) {
+        Write-Log 'Another run is active. Exiting.' 'WARN'
+        return 1
+    }
+
+    Write-Section 'Rebuild the index'
+    Write-Log 'Reading the Bible file and transcripts already on disk.'
+    Write-Log 'No crawl, no download, no transcription.'
+    Write-Log 'The live index is replaced only if the rebuild finishes.'
+    if ($Until)      { Write-Log "Will stop at $Until and leave the live index in place." }
+    if ($MaxMinutes) { Write-Log "Will stop after $MaxMinutes minutes and leave the live index in place." }
+
+    $code = Invoke-Worker -Module 'workers.index_build' `
+        -Arguments (@('--rebuild') + (Get-DeadlineArgs))
+    if ($code -eq 0) {
+        Write-Log 'Index rebuilt. Export again to refresh the Mac bundle.'
+    } else {
+        Write-Log 'Rebuild did not finish. The previous index is unchanged.' 'WARN'
+    }
+    return $code
+}
+
 function Invoke-Export {
     Write-Section 'Export portable bundle'
 
@@ -1140,6 +1169,7 @@ try {
         'Status'     { Invoke-Status }
         'Stop'       { Invoke-Stop | Out-Null }
         'Export'     { Invoke-Export | Out-Null }
+        'Reindex'    { Invoke-Reindex | Out-Null }
     }
 }
 catch {

@@ -185,3 +185,68 @@ def extract_refs(text: str) -> list[str]:
         if ref not in found:
             found.append(ref)
     return found
+
+
+def pack_refs(refs: list[str]) -> str:
+    """Store references so book names that contain spaces survive a round trip.
+
+    A space join cannot be split again: "1 John 3:1" becomes four tokens.
+    """
+    return "\n".join(dict.fromkeys(ref for ref in refs if ref))
+
+
+def unpack_refs(packed: str) -> list[str]:
+    if not packed:
+        return []
+    if "\n" in packed:
+        return [part for part in packed.split("\n") if part]
+    # One reference has no delimiter. A space-joined legacy row does not parse
+    # as a single reference, so it still splits. Reindex rewrites those rows.
+    if parse_ref(packed):
+        return [packed]
+    return [part for part in packed.split(" ") if part]
+
+
+_STORED_REF = re.compile(
+    r"^(.*)\s+(\d{1,3})(?::(\d{1,3})(?:-(\d{1,3}))?)?$"
+)
+
+
+def parse_ref(ref: str) -> tuple[str, int, int | None, int | None] | None:
+    """Return (osis, chapter, verse start, verse end) for a stored reference.
+
+    A chapter reference such as "1 John 3" has no verse bounds.
+    """
+    match = _STORED_REF.match((ref or "").strip())
+    if not match:
+        return None
+    book, chapter, verse, verse_end = match.groups()
+    osis = to_osis(book, strict=False)
+    if not osis:
+        return None
+    start = int(verse) if verse else None
+    end = int(verse_end) if verse_end else start
+    return osis, int(chapter), start, end
+
+
+def refs_overlap(left: str, right: str) -> bool:
+    """True when two references name the same book and chapter and the verses meet.
+
+    A chapter reference overlaps every verse in that chapter.
+    """
+    a = parse_ref(left)
+    b = parse_ref(right)
+    if not a or not b:
+        return False
+    if a[0] != b[0] or a[1] != b[1]:
+        return False
+    if a[2] is None or b[2] is None:
+        return True
+    a_end = a[3] if a[3] is not None else a[2]
+    b_end = b[3] if b[3] is not None else b[2]
+    return a[2] <= b_end and b[2] <= a_end
+
+
+def any_overlap(left, right) -> bool:
+    rights = list(right)
+    return any(refs_overlap(a, b) for a in left for b in rights)

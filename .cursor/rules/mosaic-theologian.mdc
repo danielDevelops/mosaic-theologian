@@ -1,0 +1,24 @@
+---
+description: Mosaic theologian identity, source hierarchy, and invariants that must survive any change
+alwaysApply: true
+---
+
+# Mosaic theologian
+
+Offline study assistant: a general local chat model plus a local index of Scripture, this church's belief statements, and its sermon transcripts. Questions are embedded at ask time. The model is not fine-tuned on the church.
+
+Windows (`Mosaic-NightJob.ps1`) crawls, transcribes, and indexes. The Intel Mac (`mosaic.sh`) only verifies the copied bundle and asks. `lib/` and `query/` ship in the bundle so both machines run the same retrieval and prompt.
+
+Authority order: Scripture, then belief statements, then sermons and articles, then general knowledge under its own heading. If the church has not addressed the question, say so. A passage marked `Connected in` a sermon is that sermon's link, not Scripture citing Scripture.
+
+Before describing the project, porting it, or changing crawl, index, retrieval, prompting, or export, read `.cursor/skills/mosaic-theologian/SKILL.md` and follow it.
+
+Do not break these:
+
+- Resume safety is write order: artifact on disk, then job step. `*.part` plus rename. A kill may cost one item. Do not rely on catching Ctrl+C.
+- Sermon identity is the normalized audio URL, not the page URL.
+- Reject a Bible source with fewer than 66 books. Never commit verse text (`data/bible/` stays gitignored).
+- The embedding model, revision, and dimension in the index manifest must match the model that queries. A mismatch is a hard stop. Changing the embedding model requires a full reindex.
+- Keep collections `scripture`, `beliefs`, and `mosaic` separate and weighted. Publish a reindex only when the side index is complete.
+- Night-job order drains on-disk audio first; index must not block crawl or download. Abort a crawl on HTTP 429 or 403.
+- Bind the chat server and web UI to loopback, and keep the query runtime hub-offline.
