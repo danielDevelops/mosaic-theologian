@@ -16,7 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from lib.config import Paths, apply_offline_env, load_settings  # noqa: E402
 from lib.llm import ChatUnavailable, LocalChat                   # noqa: E402
 from lib.prompt import build_messages, format_citations          # noqa: E402
-from lib.retrieval import Retriever                              # noqa: E402
+from lib.retrieval import Retriever, expansion_phrases           # noqa: E402
 
 BANNER = """\
 Mosaic study assistant  (local, offline)
@@ -97,7 +97,14 @@ def main() -> int:
             print()
             continue
 
-        result = retriever.search(question)
+        try:
+            phrases = expansion_phrases(
+                chat, question, retriever.expansion_max_queries,
+            )
+            result = retriever.search(question, phrases)
+        except ChatUnavailable as exc:
+            print(f"\n{exc}")
+            return 3
         last_result = result
 
         if args.show_context:

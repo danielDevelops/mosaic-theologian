@@ -159,8 +159,12 @@ class VectorStore:
 
     def filter_rows(self, collection: str, where: str,
                     columns: list[str] | None = None,
-                    limit: int = 500) -> list[dict[str, Any]]:
-        """Metadata lookup. Used to count a sermon's refs and to fetch a passage."""
+                    limit: int | None = 500) -> list[dict[str, Any]]:
+        """Metadata lookup. Used to count a sermon's refs and to fetch a passage.
+
+        `limit` None keeps every match. The related-sermon scan needs the whole
+        library; a 500-row cap would drop sermons past the first page.
+        """
         table = self._table(collection, create=False)
         if table is None:
             return []
@@ -170,12 +174,15 @@ class VectorStore:
             rows = scanner.to_table().to_pylist()
         except Exception:
             try:
-                rows = table.search().where(where).limit(limit).to_list()
+                query = table.search().where(where)
+                if limit is not None:
+                    query = query.limit(limit)
+                rows = query.to_list()
             except Exception as exc:
                 raise IndexReadError(
                     _INDEX_READ_FAILED.format(collection=collection)
                 ) from exc
-        if len(rows) > limit:
+        if limit is not None and len(rows) > limit:
             rows = rows[:limit]
         for row in rows:
             row.pop("vector", None)

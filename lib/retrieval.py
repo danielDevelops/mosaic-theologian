@@ -189,48 +189,81 @@ def _scripture_for_ref(store, ref: str) -> Passage | None:
     )
 
 
+def text_fingerprint(text: str) -> str:
+    """Prefix used to drop overlapping windows of the same passage."""
+    return (text or "")[:160].strip().lower()
+
+
+def _grouped_sermons(mosaic_hits: list[Passage]) -> list[list[Passage]]:
+    grouped: dict[str, list[Passage]] = {}
+    for hit in mosaic_hits:
+        grouped.setdefault(hit.source_id, []).append(hit)
+    return sorted(
+        grouped.values(),
+        key=lambda hits: max(hit.score for hit in hits),
+        reverse=True,
+    )
+
+
+def _chunk_ref_lists(hits: list[Passage], store) -> list[list[str]]:
+    where = f"source_id = {_sql_quote(hits[0].source_id)}"
+    rows = store.filter_rows("mosaic", where, columns=["scripture_refs"])
+    per_chunk = [bookmap.unpack_refs(row.get("scripture_refs") or "") for row in rows]
+    if not per_chunk:
+        per_chunk = [hit.scripture_refs for hit in hits]
+    return per_chunk
+
+
+def aside_refs(hits: list[Passage], store, asked_refs: set[str],
+               min_chunks: int) -> list[str]:
+    """Sustained mentions this sermon should connect for the question.
+
+    A question about the sermon's own passage does not expand its illustrations.
+    A question that names an aside, or that matched the window where the aside
+    is taught, does.
+    """
+    primary = hits[0].primary_refs
+    sustained = sustained_mentions(_chunk_ref_lists(hits, store), primary, min_chunks)
+    question_hits_primary = bool(asked_refs) and bookmap.any_overlap(asked_refs, primary)
+    if asked_refs:
+        selected = [ref for ref in sustained if bookmap.any_overlap(asked_refs, [ref])]
+        if question_hits_primary:
+            selected = [ref for ref in selected if not bookmap.any_overlap([ref], primary)]
+        return selected
+    hit_refs = [ref for hit in hits for ref in hit.scripture_refs]
+    return [ref for ref in sustained if bookmap.any_overlap(hit_refs, [ref])]
+
+
+def bridge_refs(mosaic_hits: list[Passage], store, asked_refs: set[str],
+                min_chunks: int) -> list[str]:
+    """Sustained passages that can lead to another sermon, highest score first."""
+    chosen: list[str] = []
+    for hits in _grouped_sermons(mosaic_hits):
+        for ref in aside_refs(hits, store, asked_refs, min_chunks):
+            if any(bookmap.refs_overlap(ref, existing) for existing in chosen):
+                continue
+            chosen.append(ref)
+    return chosen
+
+
 def cross_link_passages(mosaic_hits: list[Passage], store, asked_refs: set[str],
                         min_chunks: int, max_passages: int) -> list[Passage]:
     """Scripture windows a sermon connected, capped and ordered by sermon score."""
     if max_passages <= 0:
         return []
 
-    grouped: dict[str, list[Passage]] = {}
-    for hit in mosaic_hits:
-        grouped.setdefault(hit.source_id, []).append(hit)
-
-    ordered = sorted(
-        grouped.values(),
-        key=lambda hits: max(hit.score for hit in hits),
-        reverse=True,
-    )
     linked: list[Passage] = []
     seen: set[str] = set()
 
-    for hits in ordered:
+    for hits in _grouped_sermons(mosaic_hits):
         if len(linked) >= max_passages:
             break
-        primary = hits[0].primary_refs
-        where = f"source_id = {_sql_quote(hits[0].source_id)}"
-        rows = store.filter_rows("mosaic", where, columns=["scripture_refs"])
-        per_chunk = [bookmap.unpack_refs(row.get("scripture_refs") or "") for row in rows]
-        if not per_chunk:
-            per_chunk = [hit.scripture_refs for hit in hits]
-
-        sustained = sustained_mentions(per_chunk, primary, min_chunks)
-        question_hits_primary = bool(asked_refs) and bookmap.any_overlap(asked_refs, primary)
-        if asked_refs:
-            selected = [ref for ref in sustained if bookmap.any_overlap(asked_refs, [ref])]
-            if question_hits_primary:
-                selected = [ref for ref in selected if not bookmap.any_overlap([ref], primary)]
-        else:
-            hit_refs = [ref for hit in hits for ref in hit.scripture_refs]
-            selected = [ref for ref in sustained if bookmap.any_overlap(hit_refs, [ref])]
+        selected = aside_refs(hits, store, asked_refs, min_chunks)
         if not selected:
             continue
 
         targets = list(selected)
-        for ref in primary:
+        for ref in hits[0].primary_refs:
             if not bookmap.any_overlap([ref], targets):
                 targets.append(ref)
 
@@ -251,6 +284,181 @@ def cross_link_passages(mosaic_hits: list[Passage], store, asked_refs: set[str],
             linked.append(passage)
 
     return linked
+
+
+def _chunk_for_bridge(chunks: list[dict[str, Any]], ref: str) -> dict[str, Any] | None:
+    """The window that quotes the bridge, or the sermon's first window."""
+    if not chunks:
+        return None
+    quoting = [
+        chunk for chunk in chunks
+        if bookmap.any_overlap(
+            [ref], bookmap.unpack_refs(chunk.get("scripture_refs") or ""),
+        )
+    ]
+    return quoting[0] if quoting else chunks[0]
+
+
+def related_sermon_passages(mosaic_hits: list[Passage], store, bridges: list[str],
+                            max_sermons: int) -> list[Passage]:
+    """Other sermons whose main text is a bridge passage.
+
+    One hop from the sermons already retrieved. Their own asides are not followed.
+    A sermon that only mentions the passage does not qualify.
+    """
+    if max_sermons <= 0 or not bridges:
+        return []
+
+    known = {hit.source_id for hit in mosaic_hits if hit.source_id}
+    rows = store.filter_rows(
+        "mosaic",
+        "source_id != ''",
+        columns=["source_id", "primary_refs", "citation", "title", "date",
+                 "speaker", "url"],
+        limit=None,
+    )
+
+    chosen: list[tuple[str, str]] = []
+    seen = set(known)
+    for ref in bridges:
+        matches: list[dict[str, Any]] = []
+        matched_ids: set[str] = set()
+        for row in rows:
+            source_id = row.get("source_id") or ""
+            if not source_id or source_id in seen or source_id in matched_ids:
+                continue
+            primary = bookmap.unpack_refs(row.get("primary_refs") or "")
+            if not bookmap.any_overlap([ref], primary):
+                continue
+            matched_ids.add(source_id)
+            matches.append(row)
+        matches.sort(key=lambda row: (
+            (row.get("citation") or row.get("title") or ""),
+            row.get("source_id") or "",
+        ))
+        for row in matches:
+            source_id = row.get("source_id") or ""
+            seen.add(source_id)
+            chosen.append((ref, source_id))
+            if len(chosen) >= max_sermons:
+                break
+        if len(chosen) >= max_sermons:
+            break
+
+    linked: list[Passage] = []
+    for ref, source_id in chosen:
+        where = f"source_id = {_sql_quote(source_id)}"
+        chunks = store.filter_rows(
+            "mosaic", where,
+            columns=["text", "citation", "title", "url", "date", "speaker",
+                     "source_id", "primary_refs", "scripture_refs"],
+            limit=None,
+        )
+        chunk = _chunk_for_bridge(chunks, ref)
+        if chunk is None or not (chunk.get("text") or "").strip():
+            continue
+        linked.append(Passage(
+            collection="mosaic",
+            text=chunk.get("text", ""),
+            citation=chunk.get("citation", "") or chunk.get("title", ""),
+            url=chunk.get("url", ""),
+            title=chunk.get("title", ""),
+            date=chunk.get("date", ""),
+            speaker=chunk.get("speaker", ""),
+            source_id=source_id,
+            primary_refs=bookmap.unpack_refs(chunk.get("primary_refs", "")),
+            scripture_refs=bookmap.unpack_refs(chunk.get("scripture_refs", "")),
+            connection=f"Also teaches {ref}",
+        ))
+    return linked
+
+
+EXPANSION_SYSTEM = """\
+You prepare searches over sermon transcripts. The question may use words the \
+sermons never use. Reply with up to {n} short search phrases for the same \
+subject, in the biblical and pastoral wording a sermon would actually use. \
+One phrase per line. No numbering and no explanation.\
+"""
+
+
+def _strip_list_marker(line: str) -> str:
+    stripped = line.strip().lstrip("-*•").strip()
+    index = 0
+    while index < len(stripped) and stripped[index].isdigit():
+        index += 1
+    if index and index < len(stripped) and stripped[index] in ".)":
+        return stripped[index + 1:].strip()
+    return stripped
+
+
+def expansion_request(question: str, max_queries: int) -> list[dict[str, str]]:
+    """The messages that ask for sermon-worded searches. No topic list."""
+    return [
+        {"role": "system", "content": EXPANSION_SYSTEM.format(n=max_queries)},
+        {"role": "user", "content": question.strip()},
+    ]
+
+
+def parse_expansion_lines(text: str, question: str, max_queries: int) -> list[str]:
+    """Turn the model's lines into search phrases.
+
+    The question itself is dropped. Further lines past the cap are ignored.
+    """
+    if max_queries <= 0:
+        return []
+    folded_question = " ".join((question or "").casefold().split())
+    phrases: list[str] = []
+    seen = {folded_question} if folded_question else set()
+    for raw in (text or "").splitlines():
+        line = _strip_list_marker(raw)
+        if not line or len(line) > 200:
+            continue
+        key = " ".join(line.casefold().split())
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        phrases.append(line)
+        if len(phrases) >= max_queries:
+            break
+    return phrases
+
+
+def expansion_phrases(chat, question: str, max_queries: int) -> list[str]:
+    """Ask the local model how a sermon would word this subject.
+
+    Same step for every question. Nothing is special-cased by topic.
+    """
+    if max_queries <= 0 or not (question or "").strip():
+        return []
+    text = chat.complete(
+        expansion_request(question, max_queries),
+        max_tokens=96,
+        temperature=0,
+    )
+    return parse_expansion_lines(text, question, max_queries)
+
+
+def merge_expansion(existing: list[Passage], extra: list[Passage],
+                    max_new: int) -> list[Passage]:
+    """Append up to `max_new` passages whose text is not already present.
+
+    Direct hits stay in place. A duplicate keeps the earlier copy.
+    """
+    if max_new <= 0:
+        return list(existing)
+    seen = {text_fingerprint(passage.text) for passage in existing}
+    merged = list(existing)
+    added = 0
+    for passage in extra:
+        fingerprint = text_fingerprint(passage.text)
+        if not fingerprint or fingerprint in seen:
+            continue
+        seen.add(fingerprint)
+        merged.append(passage)
+        added += 1
+        if added >= max_new:
+            break
+    return merged
 
 
 class Retriever:
@@ -275,8 +483,11 @@ class Retriever:
         self.mentioned_boost = float(cfg.get("MentionedRefBoost", 0.10))
         self.cross_link_min_chunks = int(cfg.get("CrossLinkMinChunks", 2))
         self.cross_link_max = int(cfg.get("CrossLinkMaxPassages", 2))
+        self.cross_link_max_sermons = int(cfg.get("CrossLinkMaxRelatedSermons", 3))
+        self.expansion_max_queries = int(cfg.get("ExpansionMaxQueries", 3))
+        self.expansion_max_passages = int(cfg.get("ExpansionMaxPassages", 4))
 
-    def search(self, question: str) -> RetrievalResult:
+    def search(self, question: str, expansions: list[str] | None = None) -> RetrievalResult:
         vector = self.model.encode_query(question)
         asked_refs = set(bookmap.extract_refs(question))
 
@@ -289,75 +500,117 @@ class Retriever:
                 continue
 
             rows = self.store.search(collection, vector, want * self.multiplier)
-            weight = float(self.weights.get(collection, 1.0))
-            scored: list[Passage] = []
-
-            for row in rows:
-                raw = float(row.get("score", 0.0))
-                score = raw * weight
-                # Embeddings miss exact verse references. A sermon about the
-                # asked passage outranks one that only mentions it.
-                score += ref_boost_amount(
-                    collection,
-                    row.get("citation", ""),
-                    row.get("primary_refs", ""),
-                    row.get("scripture_refs", ""),
-                    asked_refs,
-                    self.primary_boost,
-                    self.mentioned_boost,
-                )
-
-                scored.append(Passage(
-                    collection=collection,
-                    text=row.get("text", ""),
-                    citation=row.get("citation", "") or row.get("title", ""),
-                    url=row.get("url", ""),
-                    title=row.get("title", ""),
-                    date=row.get("date", ""),
-                    speaker=row.get("speaker", ""),
-                    score=score,
-                    raw_score=raw,
-                    source_id=row.get("source_id", ""),
-                    primary_refs=bookmap.unpack_refs(row.get("primary_refs", "")),
-                    scripture_refs=bookmap.unpack_refs(row.get("scripture_refs", "")),
-                ))
-
+            scored = [self._passage_from_row(collection, row, asked_refs) for row in rows]
             scored.sort(key=lambda p: p.score, reverse=True)
             result.passages.extend(self._dedupe(scored)[:want])
 
+        result.passages.sort(key=lambda p: p.score, reverse=True)
+        extra = self._expansion_hits(expansions or [], asked_refs)
+        result.passages = merge_expansion(
+            result.passages, extra, self.expansion_max_passages,
+        )
         result.passages.sort(key=lambda p: p.score, reverse=True)
         result.passages = self._fit_budget(result.passages)
         self._attach_cross_links(result, asked_refs)
         return result
 
+    def _passage_from_row(self, collection: str, row: dict[str, Any],
+                          asked_refs: set[str]) -> Passage:
+        raw = float(row.get("score", 0.0))
+        score = raw * float(self.weights.get(collection, 1.0))
+        # Embeddings miss exact verse references. A sermon about the
+        # asked passage outranks one that only mentions it.
+        score += ref_boost_amount(
+            collection,
+            row.get("citation", ""),
+            row.get("primary_refs", ""),
+            row.get("scripture_refs", ""),
+            asked_refs,
+            self.primary_boost,
+            self.mentioned_boost,
+        )
+        return Passage(
+            collection=collection,
+            text=row.get("text", ""),
+            citation=row.get("citation", "") or row.get("title", ""),
+            url=row.get("url", ""),
+            title=row.get("title", ""),
+            date=row.get("date", ""),
+            speaker=row.get("speaker", ""),
+            score=score,
+            raw_score=raw,
+            source_id=row.get("source_id", ""),
+            primary_refs=bookmap.unpack_refs(row.get("primary_refs", "")),
+            scripture_refs=bookmap.unpack_refs(row.get("scripture_refs", "")),
+        )
+
+    def _expansion_hits(self, expansions: list[str], asked_refs: set[str]) -> list[Passage]:
+        """Second mosaic search using phrases the model proposed for this question."""
+        phrases: list[str] = []
+        seen: set[str] = set()
+        for phrase in expansions:
+            text = str(phrase).strip()
+            key = " ".join(text.casefold().split())
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            phrases.append(text)
+            if len(phrases) >= self.expansion_max_queries:
+                break
+        if not phrases:
+            return []
+        want = int(self.top_k.get("mosaic", 4))
+        found: list[Passage] = []
+        for phrase in phrases:
+            vector = self.model.encode_query(phrase)
+            rows = self.store.search("mosaic", vector, max(want, 1) * self.multiplier)
+            found.extend(
+                self._passage_from_row("mosaic", row, asked_refs) for row in rows
+            )
+        found.sort(key=lambda p: p.score, reverse=True)
+        return self._dedupe(found)
+
     def _attach_cross_links(self, result: RetrievalResult, asked_refs: set[str]) -> None:
-        """Pull the sermon's text and a sustained aside, labelled as the sermon's link.
+        """Pull connected Scripture and other sermons on that same passage.
 
         A question about the sermon's own passage does not expand that sermon's
-        illustrations. A question that hits an aside, or that semantically
-        matches the window where the aside is taught, does.
+        illustrations. Related sermons are one hop: their own asides are not followed.
         """
-        if self.cross_link_max <= 0:
+        if self.cross_link_max <= 0 and self.cross_link_max_sermons <= 0:
             return
-        mosaic = [p for p in result.passages if p.collection == "mosaic" and p.source_id]
+        mosaic = [
+            p for p in result.passages
+            if p.collection == "mosaic" and p.source_id and not p.connection
+        ]
         if not mosaic:
             return
-        linked = cross_link_passages(
-            mosaic, self.store, asked_refs,
-            self.cross_link_min_chunks, self.cross_link_max,
+        bridges = bridge_refs(
+            mosaic, self.store, asked_refs, self.cross_link_min_chunks,
         )
+        linked: list[Passage] = []
+        if self.cross_link_max > 0:
+            linked = cross_link_passages(
+                mosaic, self.store, asked_refs,
+                self.cross_link_min_chunks, self.cross_link_max,
+            )
+        related: list[Passage] = []
+        if self.cross_link_max_sermons > 0:
+            related = related_sermon_passages(
+                mosaic, self.store, bridges, self.cross_link_max_sermons,
+            )
         used = sum(len(p.text) + len(p.label) + len(p.connection) + 32
                    for p in result.passages)
-        kept = 0
-        for passage in linked:
-            if kept >= self.cross_link_max:
-                break
+        scripture_kept = 0
+        for passage in linked + related:
+            if passage.collection == "scripture" and scripture_kept >= self.cross_link_max:
+                continue
             cost = len(passage.text) + len(passage.label) + len(passage.connection) + 32
             if used + cost > self.max_context:
                 continue
             result.passages.append(passage)
             used += cost
-            kept += 1
+            if passage.collection == "scripture":
+                scripture_kept += 1
 
     @staticmethod
     def _dedupe(passages: list[Passage]) -> list[Passage]:
@@ -365,7 +618,7 @@ class Retriever:
         seen: set[str] = set()
         out: list[Passage] = []
         for passage in passages:
-            fingerprint = passage.text[:160].strip().lower()
+            fingerprint = text_fingerprint(passage.text)
             if fingerprint in seen:
                 continue
             seen.add(fingerprint)

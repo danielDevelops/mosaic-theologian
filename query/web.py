@@ -21,7 +21,7 @@ from pydantic import BaseModel                                   # noqa: E402
 from lib.config import Paths, apply_offline_env, load_settings   # noqa: E402
 from lib.llm import ChatUnavailable, LocalChat                   # noqa: E402
 from lib.prompt import build_messages, format_citations          # noqa: E402
-from lib.retrieval import Retriever                              # noqa: E402
+from lib.retrieval import Retriever, expansion_phrases           # noqa: E402
 
 apply_offline_env()
 
@@ -192,7 +192,11 @@ def ask(request: AskRequest) -> StreamingResponse:
 
     def generate():
         try:
-            result = retriever().search(request.question)
+            found = retriever()
+            phrases = expansion_phrases(
+                _chat, request.question, found.expansion_max_queries,
+            )
+            result = found.search(request.question, phrases)
             messages = build_messages(result, request.history)
             for piece in _chat.stream(messages):
                 yield emit({"token": piece})

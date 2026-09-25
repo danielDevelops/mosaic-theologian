@@ -172,11 +172,19 @@ plus a reference boost:
 - Older rows with empty `primary_refs` still boost when the citation string
   itself names the passage.
 
-Hits are deduped on a text prefix, sorted, and trimmed to
-`Retrieval.MaxContextChars`, keeping at least one passage from each
-collection that had a hit.
+Hits are deduped on a text prefix and sorted. After the extra sermon search
+below, they are trimmed to `Retrieval.MaxContextChars`, keeping at least one
+passage from each collection that had a hit.
 
 ### Cross-links
+
+Before the budget trim, every question asks the local chat model for up to
+`ExpansionMaxQueries` short search phrases: the same subject, in wording a
+sermon might actually use. Those phrases are embedded and searched in the
+mosaic collection. New chunks are merged up to `ExpansionMaxPassages`. Direct
+hits are kept; a duplicate keeps the earlier copy. The combined list is scored
+again and trimmed. There is no topic list. If that step returns nothing, the
+question stays a single embedding.
 
 After the budget trim, `cross_link_passages` may append up to
 `CrossLinkMaxPassages` scripture windows:
@@ -193,11 +201,22 @@ After the budget trim, `cross_link_passages` may append up to
 - Fetch the tightest indexed scripture window that covers the reference
   (`select_scripture_window`). Label it `Connected in {sermon}`.
 
-`lib/prompt.py` renders those linked windows under church teaching, not under
-the Scripture block. `SYSTEM_PROMPT` is the authority order. General knowledge
-stays under its own heading. `mosaic_is_silent` is true when no beliefs or
-mosaic passage has raw similarity above 0.35; the user message then tells the
-model to say the church has not addressed it.
+Those sustained refs are also a one-hop bridge to other sermons.
+`related_sermon_passages` keeps up to `CrossLinkMaxRelatedSermons` sermons
+whose `primary_refs` overlap a bridge ref, one chunk each (the window that
+quotes the ref), labeled `Also teaches {ref}`. Sermons already retrieved are
+skipped. A passing mention does not qualify. The related sermon's own asides
+are not followed. The scan of `primary_refs` is not cut off at 500 rows.
+Scripture links and related sermons still have to fit in `MaxContextChars`.
+
+`lib/prompt.py` renders connected Scripture and related sermons under church
+teaching, not under the Scripture block. `SYSTEM_PROMPT` is the authority
+order. The reply is one integrated answer: Scripture leads, church teaching
+is woven in, and general knowledge is marked in the sentence rather than under
+its own heading. The model does not print a source list; citations are appended
+after the answer. `mosaic_is_silent` is true when no beliefs or mosaic passage
+has raw similarity above 0.35; the user message then tells the model to say
+the church has not addressed it.
 
 `build_messages` keeps the last six history turns. Citations come from
 `format_citations`.
@@ -227,7 +246,7 @@ problem, `2` embedding mismatch. Do not bypass a mismatch.
 | Test | What it locks |
 |---|---|
 | `tests/test_pipeline.py` | Discovery, rerun, batching, dedup, single URL, resume, orphan audio, excluded campus. Uses `tests/fixture_server.py` and `MOSAIC_ROOT` |
-| `tests/test_cross_links.py` | Ref pack/unpack, primary stamp, sustained filter, boosts, cross-link hops, prompt labels, side-index replace |
+| `tests/test_cross_links.py` | Ref pack/unpack, primary stamp, sustained filter, boosts, cross-link hops, related sermons, expansion matching, prompt labels, side-index replace |
 | `tests/test_chat_model.py` | GGUF download size checks |
 | `tests/test_embedding_snapshot.py` | 6.1 Normalize path loads on 5.7 without editing the bundled file |
 
@@ -244,7 +263,7 @@ source.
 - [ ] Three collections; beliefs stay whole; sermon page prose is not double-indexed
 - [ ] Manifest records embedding identity; query and verify refuse a mismatch
 - [ ] Reference boosts and cross-links match `lib/retrieval.py`
-- [ ] Prompt attributes `Connected in` to the sermon and admits silence
+- [ ] Prompt writes one answer, attributes `Connected in` and `Also teaches`, and admits silence
 - [ ] Night loop drains on-disk audio first and does not let index starve crawl
 - [ ] Reindex replaces the live index only when the side index is finished
 - [ ] Export checksums every shipped file; Mac verify replays them

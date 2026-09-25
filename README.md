@@ -20,9 +20,10 @@ Two pieces work together:
    It supplies what was actually said, so claims are grounded and checkable.
 
 Answers follow a source hierarchy: Scripture first, then the church's belief
-statements, then its sermons and articles, then general knowledge under a
-clearly marked heading. When the church has not addressed a question, the
-answer says so instead of inventing a position.
+statements, then its sermons and articles, woven into one explanation.
+General knowledge is marked in the sentence when it is not in the supplied
+sources. When the church has not addressed a question, the answer says so
+instead of inventing a position. Citations are printed after the answer.
 
 ## Two machines
 

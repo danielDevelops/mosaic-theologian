@@ -52,12 +52,16 @@ class LocalChat:
 
     # ------------------------------------------------------------ chat --
 
-    def stream(self, messages: list[dict[str, str]]) -> Iterator[str]:
+    def stream(self, messages: list[dict[str, str]], *,
+               max_tokens: int | None = None,
+               temperature: float | None = None) -> Iterator[str]:
+        token_limit = self.max_tokens if max_tokens is None else max_tokens
+        temperature = self.temperature if temperature is None else temperature
         payload = {
             "model": self.model_name,
             "messages": messages,
-            "max_tokens": self.max_tokens,
-            "temperature": self.temperature,
+            "max_tokens": token_limit,
+            "temperature": temperature,
             "top_p": self.top_p,
             "stream": True,
         }
@@ -68,7 +72,9 @@ class LocalChat:
                 json=payload, stream=True, timeout=self.timeout,
             ) as response:
                 if response.status_code == 404:
-                    yield from self._stream_native(messages)
+                    yield from self._stream_native(
+                        messages, max_tokens=token_limit, temperature=temperature,
+                    )
                     return
                 response.raise_for_status()
 
@@ -93,13 +99,14 @@ class LocalChat:
         except requests.RequestException as exc:
             raise ChatUnavailable(f"Local model request failed: {exc}") from exc
 
-    def _stream_native(self, messages: list[dict[str, str]]) -> Iterator[str]:
+    def _stream_native(self, messages: list[dict[str, str]], *,
+                       max_tokens: int, temperature: float) -> Iterator[str]:
         """Fallback for llama.cpp builds without the OpenAI-compatible route."""
         prompt = self._flatten(messages)
         payload = {
             "prompt": prompt,
-            "n_predict": self.max_tokens,
-            "temperature": self.temperature,
+            "n_predict": max_tokens,
+            "temperature": temperature,
             "top_p": self.top_p,
             "stream": True,
         }
@@ -120,8 +127,12 @@ class LocalChat:
                 if chunk.get("stop"):
                     break
 
-    def complete(self, messages: list[dict[str, str]]) -> str:
-        return "".join(self.stream(messages))
+    def complete(self, messages: list[dict[str, str]], *,
+                 max_tokens: int | None = None,
+                 temperature: float | None = None) -> str:
+        return "".join(self.stream(
+            messages, max_tokens=max_tokens, temperature=temperature,
+        ))
 
     @staticmethod
     def _flatten(messages: list[dict[str, str]]) -> str:

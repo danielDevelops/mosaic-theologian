@@ -25,27 +25,26 @@ Rules:
 
 - Ground the answer in the supplied passages. Quote or reference them by their \
 citation labels so every claim can be checked.
-- Where Scripture speaks to the question, lead with it.
+- Where Scripture speaks to the question, lead with it, then weave in this \
+church's belief statements and sermons in the same explanation.
 - Never attribute a position to this church unless the supplied CHURCH BELIEFS \
 or CHURCH TEACHING passages actually support it. If they do not address the \
-question, say so plainly.
-- You may and should use general knowledge to define terms, explain historical \
-debates, and give context the church never addressed directly. Put that \
-material under a clearly labelled heading so the reader can tell it apart from \
-what the church teaches.
+question, say so in the same answer.
+- You may use general knowledge to define terms, explain historical debates, \
+and give context the church never addressed directly. When a point is only \
+general knowledge and is not in the supplied sources, mark that sentence in \
+place so it is not attributed to the church. Do not give it a heading of its own.
 - When the sources genuinely conflict or a question is historically contested, \
-present the positions fairly instead of flattening them into one answer.
+present the positions fairly inside the same answer.
 - A passage marked "Connected in" a sermon is a link that sermon drew. Attribute \
 the link to the sermon. Do not treat it as one biblical text citing the other, \
 and do not treat it as what the sermon's main passage itself says.
+- A passage marked "Also teaches" is another sermon on that same passage. \
+Attribute it to that sermon.
 - Be direct and pastoral. Do not pad. If you do not know, say so.
-
-Structure longer answers as:
-
-  What Scripture says
-  What this church teaches   (or: This church has not addressed this directly)
-  Wider Christian thought    (clearly marked as general knowledge)
-  Summary
+- Write one integrated answer. Do not use section headings such as "what the \
+Bible says", "what Mosaic says", or "wider Christian thought".
+- Do not write a sources list. Citations are printed after your reply.
 """
 
 
@@ -67,14 +66,19 @@ def _render_block(title: str, passages, note: str = "") -> str:
 def build_user_message(result: RetrievalResult) -> str:
     scripture = [p for p in result.by_collection("scripture") if not p.connection]
     beliefs = result.by_collection("beliefs")
-    mosaic = result.by_collection("mosaic")
+    mosaic = [p for p in result.by_collection("mosaic") if not p.connection]
     linked = [p for p in result.passages if p.connection]
 
     teaching_note = "Each label is title | speaker | date."
-    if linked:
+    if any(p.connection.startswith("Connected in") for p in linked):
         teaching_note += (
             " A line that begins Connected in names the sermon that drew that "
             "link. It is not a claim that one biblical text cites the other."
+        )
+    if any(p.connection.startswith("Also teaches") for p in linked):
+        teaching_note += (
+            " A line that begins Also teaches names the passage that joins "
+            "that sermon to one already retrieved."
         )
 
     parts = [

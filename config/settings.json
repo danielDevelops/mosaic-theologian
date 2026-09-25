@@ -122,7 +122,10 @@
     "PrimaryRefBoost": 0.25,
     "MentionedRefBoost": 0.1,
     "CrossLinkMinChunks": 2,
-    "CrossLinkMaxPassages": 2
+    "CrossLinkMaxPassages": 2,
+    "CrossLinkMaxRelatedSermons": 3,
+    "ExpansionMaxQueries": 3,
+    "ExpansionMaxPassages": 4
   },
 
   "Web": {

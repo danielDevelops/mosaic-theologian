@@ -64,10 +64,10 @@ you hit enter and matched against stored source text, so there is no list of
 supported questions to maintain.
 
 Answers follow a source hierarchy - Scripture first, then the church's belief
-statements, then its sermons and articles, then general theological knowledge
-under a clearly marked heading. If the church has not addressed something, the
-answer says so rather than inventing a position for it. Citations are printed
-after each answer.
+statements, then its sermons and articles, woven into one explanation. General
+theological knowledge is marked in the sentence when it is not in the supplied
+sources. If the church has not addressed something, the answer says so rather
+than inventing a position for it. Citations are printed after each answer.
 
 In the CLI, `:sources` reprints the citations, `:clear` drops the conversation
 history, and `:quit` exits.

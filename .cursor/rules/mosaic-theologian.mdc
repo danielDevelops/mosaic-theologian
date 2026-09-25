@@ -9,7 +9,7 @@ Offline study assistant: a general local chat model plus a local index of Script
 
 Windows (`Mosaic-NightJob.ps1`) crawls, transcribes, and indexes. The Intel Mac (`mosaic.sh`) only verifies the copied bundle and asks. `lib/` and `query/` ship in the bundle so both machines run the same retrieval and prompt.
 
-Authority order: Scripture, then belief statements, then sermons and articles, then general knowledge under its own heading. If the church has not addressed the question, say so. A passage marked `Connected in` a sermon is that sermon's link, not Scripture citing Scripture.
+Authority order: Scripture, then belief statements, then sermons and articles, woven into one explanation. General knowledge is marked in the sentence when it is not in the supplied sources. If the church has not addressed the question, say so. A passage marked `Connected in` a sermon is that sermon's link, not Scripture citing Scripture. A passage marked `Also teaches` is another sermon on that passage, one hop only.
 
 Before describing the project, porting it, or changing crawl, index, retrieval, prompting, or export, read `.cursor/skills/mosaic-theologian/SKILL.md` and follow it.
 

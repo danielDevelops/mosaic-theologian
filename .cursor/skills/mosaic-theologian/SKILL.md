@@ -30,9 +30,10 @@ Write for someone who will run it, not for someone reviewing a diff.
    general (Llama 3.1 8B Instruct or the GGUF named in `config/settings.json`)
    and that questions are embedded at ask time.
 2. State the source hierarchy in this order: Scripture, then this church's
-   belief statements, then its sermons and articles, then general knowledge
-   under a clearly marked heading. When the church has not addressed the
-   question, the answer says so.
+   belief statements, then its sermons and articles, woven into one
+   explanation. General knowledge is marked in the sentence when it is not in
+   the supplied sources. When the church has not addressed the question, the
+   answer says so. Citations follow the answer.
 3. Draw the two machines. Windows 11 with the RTX builds the library
    (`Mosaic-NightJob.ps1`). The Intel Mac only asks (`mosaic.sh`). The handoff
    is a file copy of the bundle. After the copy the Mac never contacts
