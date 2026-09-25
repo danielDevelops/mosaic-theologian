@@ -172,19 +172,22 @@ plus a reference boost:
 - Older rows with empty `primary_refs` still boost when the citation string
   itself names the passage.
 
-Hits are deduped on a text prefix and sorted. After the extra sermon search
-below, they are trimmed to `Retrieval.MaxContextChars`, keeping at least one
-passage from each collection that had a hit.
+Hits are deduped on a text prefix and sorted. After the act-restatement
+search below, they are trimmed to `Retrieval.MaxContextChars`. Scripture
+windows from that search are kept first. At least one passage from each
+other collection is kept when it fits.
 
 ### Cross-links
 
 Before the budget trim, every question asks the local chat model for up to
-`ExpansionMaxQueries` short search phrases: the same subject, in wording a
-sermon might actually use. Those phrases are embedded and searched in the
-mosaic collection. New chunks are merged up to `ExpansionMaxPassages`. Direct
-hits are kept; a duplicate keeps the earlier copy. The combined list is scored
-again and trimmed. There is no topic list. If that step returns nothing, the
-question stays a single embedding.
+`ExpansionMaxQueries` short search phrases. Each phrase restates the concrete
+act in the question, in plain wording Scripture or a sermon would use for that
+act. No verdict and no modern label. There is no topic list. Those phrases are
+embedded and searched in scripture, beliefs, and mosaic. Direct hits are kept;
+a duplicate keeps the earlier copy. Up to `ExpansionMaxScripture` new scripture
+windows are reserved so the budget trim cannot drop them in favor of a
+higher-scoring sermon. Other new chunks are merged up to `ExpansionMaxPassages`.
+If that step returns nothing, the question stays a single embedding.
 
 After the budget trim, `cross_link_passages` may append up to
 `CrossLinkMaxPassages` scripture windows:
@@ -213,10 +216,12 @@ Scripture links and related sermons still have to fit in `MaxContextChars`.
 teaching, not under the Scripture block. `SYSTEM_PROMPT` is the authority
 order. The reply is one integrated answer: Scripture leads, church teaching
 is woven in, and general knowledge is marked in the sentence rather than under
-its own heading. The model does not print a source list; citations are appended
-after the answer. `mosaic_is_silent` is true when no beliefs or mosaic passage
-has raw similarity above 0.35; the user message then tells the model to say
-the church has not addressed it.
+its own heading. A modern word in the question is answered by naming the act
+the supplied passages describe. General knowledge does not fill that gap or
+contradict a supplied passage. The model does not print a source list;
+citations are appended after the answer. `mosaic_is_silent` is true when no
+beliefs or mosaic passage has raw similarity above 0.35; the user message then
+tells the model to say the church has not addressed it.
 
 `build_messages` keeps the last six history turns. Citations come from
 `format_citations`.

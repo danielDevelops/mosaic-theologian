@@ -22,6 +22,7 @@ from lib.retrieval import (
     cross_link_passages,
     EXPANSION_SYSTEM,
     expansion_request,
+    fit_context,
     parse_expansion_lines,
     merge_expansion,
     ref_boost_amount,
@@ -320,9 +321,14 @@ def test_expansion() -> None:
             encoding="utf-8",
         )
     )
+    instruction = EXPANSION_SYSTEM.casefold()
     check("settings carry no topic list",
           "Expansions" not in settings["Retrieval"]
-          and "arminian" not in EXPANSION_SYSTEM.casefold())
+          and "arminian" not in instruction
+          and "abortion" not in instruction
+          and "exposure" not in instruction)
+    check("the expansion restates the act with no verdict",
+          "concrete act" in instruction and "no verdict" in instruction)
     question = "How should we talk about this?"
     request = expansion_request(question, 3)
     check("the expansion request is the question plus a general instruction",
@@ -364,6 +370,33 @@ def test_expansion() -> None:
           [p.citation for p in merged] == ["Direct", "Second", "Election"],
           str([p.citation for p in merged]))
 
+    already = Passage(
+        collection="scripture", text="a man lies with a male",
+        citation="Leviticus 18:22", score=0.4,
+    )
+    again = Passage(
+        collection="scripture", text="a man lies with a male",
+        citation="Leviticus 18:22", score=0.8, from_expansion=True,
+    )
+    reserved = merge_expansion([already], [again], 3)
+    check("a scripture hit found again by the act search is reserved",
+          reserved[0].from_expansion is True and len(reserved) == 1)
+
+    sermon = Passage(
+        collection="mosaic", text="word " * 2000, citation="Sermon", score=0.99,
+    )
+    nearby = Passage(
+        collection="scripture", text="a wedding", citation="John 2:1", score=0.95,
+    )
+    act = Passage(
+        collection="scripture", text="a man lies with a male",
+        citation="Leviticus 18:22", score=0.1, from_expansion=True,
+    )
+    kept = fit_context([sermon, nearby, act], 5000)
+    check("act-matched scripture is kept when a sermon fills the budget",
+          [p.citation for p in kept] == ["Leviticus 18:22", "Sermon"],
+          str([p.citation for p in kept]))
+
 
 def test_prompt_labels_links_under_teaching() -> None:
     result = RetrievalResult(question="What about the Nephilim?")
@@ -395,6 +428,10 @@ def test_prompt_labels_links_under_teaching() -> None:
           "What Scripture says" not in SYSTEM_PROMPT
           and "Wider Christian thought" not in SYSTEM_PROMPT
           and "Do not write a sources list" in SYSTEM_PROMPT)
+    check("a modern word is answered from the act in the passages",
+          "modern word" in SYSTEM_PROMPT
+          and "Do not fill that gap from general knowledge." in SYSTEM_PROMPT
+          and "Do not add an outside position the passages do not contain." in SYSTEM_PROMPT)
 
 
 def test_replace_index() -> None:

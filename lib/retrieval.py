@@ -33,6 +33,7 @@ class Passage:
     primary_refs: list[str] = field(default_factory=list)
     scripture_refs: list[str] = field(default_factory=list)
     connection: str = ""
+    from_expansion: bool = False
 
     @property
     def label(self) -> str:
@@ -374,10 +375,11 @@ def related_sermon_passages(mosaic_hits: list[Passage], store, bridges: list[str
 
 
 EXPANSION_SYSTEM = """\
-You prepare searches over sermon transcripts. The question may use words the \
-sermons never use. Reply with up to {n} short search phrases for the same \
-subject, in the biblical and pastoral wording a sermon would actually use. \
-One phrase per line. No numbering and no explanation.\
+You prepare searches over Scripture and sermons. The question may use modern \
+words the sources never use. Reply with up to {n} short search phrases that \
+restate the concrete act in the question: who does what. Use plain wording an \
+English Bible or a sermon would use for that act. No verdict, no modern \
+label, and no explanation. One phrase per line.\
 """
 
 
@@ -392,7 +394,7 @@ def _strip_list_marker(line: str) -> str:
 
 
 def expansion_request(question: str, max_queries: int) -> list[dict[str, str]]:
-    """The messages that ask for sermon-worded searches. No topic list."""
+    """The messages that ask for an act restatement. No topic list."""
     return [
         {"role": "system", "content": EXPANSION_SYSTEM.format(n=max_queries)},
         {"role": "user", "content": question.strip()},
@@ -424,7 +426,7 @@ def parse_expansion_lines(text: str, question: str, max_queries: int) -> list[st
 
 
 def expansion_phrases(chat, question: str, max_queries: int) -> list[str]:
-    """Ask the local model how a sermon would word this subject.
+    """Ask the local model to restate this question as a concrete act.
 
     Same step for every question. Nothing is special-cased by topic.
     """
@@ -446,19 +448,65 @@ def merge_expansion(existing: list[Passage], extra: list[Passage],
     """
     if max_new <= 0:
         return list(existing)
-    seen = {text_fingerprint(passage.text) for passage in existing}
     merged = list(existing)
+    index_by_fingerprint: dict[str, int] = {}
+    for index, passage in enumerate(merged):
+        fingerprint = text_fingerprint(passage.text)
+        if fingerprint:
+            index_by_fingerprint[fingerprint] = index
     added = 0
     for passage in extra:
         fingerprint = text_fingerprint(passage.text)
-        if not fingerprint or fingerprint in seen:
+        if not fingerprint:
             continue
-        seen.add(fingerprint)
+        if fingerprint in index_by_fingerprint:
+            # The act search found a Scripture window the question also hit.
+            # Keep that copy, and reserve it so the budget cannot drop it.
+            kept = merged[index_by_fingerprint[fingerprint]]
+            if passage.from_expansion and passage.collection == "scripture":
+                kept.from_expansion = True
+            continue
+        index_by_fingerprint[fingerprint] = len(merged)
         merged.append(passage)
         added += 1
         if added >= max_new:
             break
     return merged
+
+
+def fit_context(passages: list[Passage], max_context: int) -> list[Passage]:
+    """Trim to the context budget.
+
+    Scripture found by the act restatement is placed first, so a long sermon
+    cannot crowd out the passage that names the act. At least one passage
+    from each other collection is kept when it fits.
+    """
+    reserved = [
+        passage for passage in passages
+        if passage.from_expansion and passage.collection == "scripture"
+    ]
+    rest = [
+        passage for passage in passages
+        if not (passage.from_expansion and passage.collection == "scripture")
+    ]
+    kept: list[Passage] = []
+    used = 0
+    represented: set[str] = set()
+
+    for passage in reserved + rest:
+        cost = len(passage.text) + len(passage.label) + 32
+        first_of_kind = passage.collection not in represented
+
+        if used + cost > max_context and not first_of_kind:
+            continue
+        if used + cost > max_context and first_of_kind and used > max_context:
+            continue
+
+        kept.append(passage)
+        represented.add(passage.collection)
+        used += cost
+
+    return kept
 
 
 class Retriever:
@@ -486,6 +534,7 @@ class Retriever:
         self.cross_link_max_sermons = int(cfg.get("CrossLinkMaxRelatedSermons", 3))
         self.expansion_max_queries = int(cfg.get("ExpansionMaxQueries", 3))
         self.expansion_max_passages = int(cfg.get("ExpansionMaxPassages", 4))
+        self.expansion_max_scripture = int(cfg.get("ExpansionMaxScripture", 3))
 
     def search(self, question: str, expansions: list[str] | None = None) -> RetrievalResult:
         vector = self.model.encode_query(question)
@@ -506,8 +555,13 @@ class Retriever:
 
         result.passages.sort(key=lambda p: p.score, reverse=True)
         extra = self._expansion_hits(expansions or [], asked_refs)
+        scripture_extra = [p for p in extra if p.collection == "scripture"]
+        other_extra = [p for p in extra if p.collection != "scripture"]
         result.passages = merge_expansion(
-            result.passages, extra, self.expansion_max_passages,
+            result.passages, scripture_extra, self.expansion_max_scripture,
+        )
+        result.passages = merge_expansion(
+            result.passages, other_extra, self.expansion_max_passages,
         )
         result.passages.sort(key=lambda p: p.score, reverse=True)
         result.passages = self._fit_budget(result.passages)
@@ -545,7 +599,7 @@ class Retriever:
         )
 
     def _expansion_hits(self, expansions: list[str], asked_refs: set[str]) -> list[Passage]:
-        """Second mosaic search using phrases the model proposed for this question."""
+        """Search every collection with the act-restatement phrases."""
         phrases: list[str] = []
         seen: set[str] = set()
         for phrase in expansions:
@@ -559,14 +613,18 @@ class Retriever:
                 break
         if not phrases:
             return []
-        want = int(self.top_k.get("mosaic", 4))
         found: list[Passage] = []
         for phrase in phrases:
             vector = self.model.encode_query(phrase)
-            rows = self.store.search("mosaic", vector, max(want, 1) * self.multiplier)
-            found.extend(
-                self._passage_from_row("mosaic", row, asked_refs) for row in rows
-            )
+            for collection in COLLECTIONS:
+                want = int(self.top_k.get(collection, 4))
+                if want <= 0:
+                    continue
+                rows = self.store.search(collection, vector, max(want, 1) * self.multiplier)
+                for row in rows:
+                    passage = self._passage_from_row(collection, row, asked_refs)
+                    passage.from_expansion = True
+                    found.append(passage)
         found.sort(key=lambda p: p.score, reverse=True)
         return self._dedupe(found)
 
@@ -626,22 +684,5 @@ class Retriever:
         return out
 
     def _fit_budget(self, passages: list[Passage]) -> list[Passage]:
-        """Trim to the context budget, keeping at least one of each source."""
-        kept: list[Passage] = []
-        used = 0
-        represented: set[str] = set()
-
-        for passage in passages:
-            cost = len(passage.text) + len(passage.label) + 32
-            first_of_kind = passage.collection not in represented
-
-            if used + cost > self.max_context and not first_of_kind:
-                continue
-            if used + cost > self.max_context and first_of_kind and used > self.max_context:
-                continue
-
-            kept.append(passage)
-            represented.add(passage.collection)
-            used += cost
-
-        return kept
+        """Trim to the context budget, keeping act-matched Scripture."""
+        return fit_context(passages, self.max_context)

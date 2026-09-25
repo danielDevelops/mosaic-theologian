@@ -125,7 +125,8 @@
     "CrossLinkMaxPassages": 2,
     "CrossLinkMaxRelatedSermons": 3,
     "ExpansionMaxQueries": 3,
-    "ExpansionMaxPassages": 4
+    "ExpansionMaxPassages": 4,
+    "ExpansionMaxScripture": 3
   },
 
   "Web": {
